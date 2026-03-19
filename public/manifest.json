@@ -1,0 +1,44 @@
+{
+  "name": "MediCare Plus",
+  "short_name": "MediCare+",
+  "description": "Smart Hospital Management System for modern healthcare facilities",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#3B82F6",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/assets/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Appointments",
+      "short_name": "Appointments",
+      "description": "View your appointments",
+      "url": "/appointments",
+      "icons": [{ "src": "/assets/logo.png", "sizes": "512x512" }]
+    },
+    {
+      "name": "Medical Records",
+      "short_name": "Records",
+      "description": "Access medical records",
+      "url": "/medical-records",
+      "icons": [{ "src": "/assets/logo.png", "sizes": "512x512" }]
+    },
+    {
+      "name": "Billing",
+      "short_name": "Billing",
+      "description": "View and pay bills",
+      "url": "/billing",
+      "icons": [{ "src": "/assets/logo.png", "sizes": "512x512" }]
+    }
+  ],
+  "related_applications": [],
+  "prefer_related_applications": false,
+  "categories": ["medical", "health", "productivity"]
+}

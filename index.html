@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.firebaseio.com https://*.googleapis.com https://apis.google.com https://*.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://*.firebaseio.com https://*.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com wss://*.firebaseio.com; frame-src 'self' https://*.firebaseapp.com;">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/logo.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes" />
+    <meta name="description" content="MediCare Plus - Smart Hospital Management System for modern healthcare facilities in Pakistan" />
+    <meta name="keywords" content="hospital management, healthcare, EMR, patient portal, doctor portal, Pakistan, medical records, appointments" />
+    <meta name="author" content="MediCare Plus" />
+    <meta name="robots" content="index, follow" />
+    
+    <!-- Open Graph / Social Media Meta Tags -->
+    <meta property="og:title" content="MediCare Plus - Smart Hospital Management System" />
+    <meta property="og:description" content="Complete healthcare management solution for hospitals, doctors, and patients. Book appointments, access medical records, and consult with doctors seamlessly." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://medicare-plus.com" />
+    <meta property="og:image" content="/og-image.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:site_name" content="MediCare Plus" />
+    
+    <!-- Twitter Card Meta Tags -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="MediCare Plus - Smart Hospital Management System" />
+    <meta name="twitter:description" content="Complete healthcare management solution for hospitals, doctors, and patients" />
+    <meta name="twitter:image" content="/twitter-image.jpg" />
+    <meta name="twitter:site" content="@medicareplus" />
+    <meta name="twitter:creator" content="@medicareplus" />
+    
+    <!-- PWA Meta Tags -->
+    <meta name="theme-color" content="#3B82F6" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#1E293B" media="(prefers-color-scheme: dark)" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="MediCare Plus" />
+    <meta name="msapplication-TileColor" content="#3B82F6" />
+    <meta name="msapplication-TileImage" content="/assets/logo.png" />
+    <meta name="application-name" content="MediCare Plus" />
+    
+    <!-- Manifest for PWA -->
+    <link rel="manifest" href="/manifest.json" />
+    
+    <!-- Apple Touch Icons -->
+    <link rel="apple-touch-icon" href="/assets/logo.png" />
+    <link rel="apple-touch-icon" sizes="152x152" href="/assets/logo-152.png" />
+    <link rel="apple-touch-icon" sizes="167x152" href="/assets/logo-167.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/assets/logo-180.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/assets/logo-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/assets/logo-16.png" />
+    
+    <!-- Preconnect to external domains for performance -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="preconnect" href="https://www.gstatic.com" />
+    <link rel="preconnect" href="https://apis.google.com" />
+    <link rel="preconnect" href="https://firebase.googleapis.com" />
+    <link rel="preconnect" href="https://*.firebaseio.com" />
+    
+    <!-- DNS Prefetch for faster domain resolution -->
+    <link rel="dns-prefetch" href="https://fonts.googleapis.com" />
+    <link rel="dns-prefetch" href="https://fonts.gstatic.com" />
+    <link rel="dns-prefetch" href="https://www.gstatic.com" />
+    <link rel="dns-prefetch" href="https://apis.google.com" />
+    <link rel="dns-prefetch" href="https://firebase.googleapis.com" />
+    
+    <!-- Google Fonts - Inter font for better typography -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+
+    <!-- Title -->
+    <title>MediCare Plus - Smart Hospital Management System</title>
+    
+    <!-- Inline critical CSS to prevent FOUC and improve perceived performance -->
+    <style>
+      /* Critical CSS for initial render */
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      
+      html, body {
+        width: 100%;
+        min-height: 100vh;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        scroll-behavior: smooth;
+      }
+      
+      body {
+        background: linear-gradient(135deg, #f6f8fc 0%, #f0f4fa 100%);
+        color: #111827;
+        transition: background 0.3s ease, color 0.3s ease;
+        position: relative;
+        overflow-x: hidden;
+      }
+      
+      /* Animated background elements */
+      body::before {
+        content: '';
+        position: fixed;
+        top: -50%;
+        left: -50%;
+        width: 200%;
+        height: 200%;
+        background: radial-gradient(circle, rgba(59, 130, 246, 0.03) 0%, transparent 50%);
+        animation: rotate 30s linear infinite;
+        pointer-events: none;
+        z-index: -1;
+      }
+      
+      body::after {
+        content: '';
+        position: fixed;
+        bottom: -50%;
+        right: -50%;
+        width: 200%;
+        height: 200%;
+        background: radial-gradient(circle, rgba(16, 185, 129, 0.03) 0%, transparent 50%);
+        animation: rotate 40s linear infinite reverse;
+        pointer-events: none;
+        z-index: -1;
+      }
+      
+      @keyframes rotate {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+      }
+      
+      /* Dark mode styles */
+      body.dark {
+        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+        color: #f9fafb;
+      }
+      
+      body.dark::before {
+        background: radial-gradient(circle, rgba(59, 130, 246, 0.05) 0%, transparent 50%);
+      }
+      
+      body.dark::after {
+        background: radial-gradient(circle, rgba(16, 185, 129, 0.05) 0%, transparent 50%);
+      }
+      
+      /* Loading animation container */
+      #root {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+        z-index: 1;
+      }
+      
+      .loading-container {
+        text-align: center;
+        animation: fadeIn 0.5s ease-out;
+      }
+      
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+      
+      /* Logo animation */
+      .loading-logo {
+        width: 80px;
+        height: 80px;
+        margin: 0 auto 1.5rem;
+        position: relative;
+        animation: pulse 2s infinite;
+      }
+      
+      .loading-logo img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        filter: drop-shadow(0 10px 15px rgba(59, 130, 246, 0.2));
+      }
+      
+      .dark .loading-logo img {
+        filter: drop-shadow(0 10px 15px rgba(59, 130, 246, 0.4));
+      }
+      
+      @keyframes pulse {
+        0%, 100% { transform: scale(1); }
+        50% { transform: scale(1.05); }
+      }
+      
+      /* Enhanced spinner */
+      .loading-spinner {
+        width: 56px;
+        height: 56px;
+        margin: 0 auto 1.5rem;
+        border: 3px solid transparent;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #3B82F6, #10B981) border-box;
+        -webkit-mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+        mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+        -webkit-mask-composite: destination-out;
+        mask-composite: exclude;
+        animation: spin 1s cubic-bezier(0.68, -0.55, 0.265, 1.55) infinite;
+      }
+      
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      
+      /* Loading text with gradient */
+      .loading-text {
+        font-size: 1.5rem;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+        background: linear-gradient(135deg, #3B82F6, #10B981);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        animation: shimmer 2s infinite;
+      }
+      
+      @keyframes shimmer {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.8; }
+      }
+      
+      .loading-subtext {
+        font-size: 0.875rem;
+        color: #6B7280;
+        max-width: 280px;
+        margin: 0 auto;
+      }
+      
+      body.dark .loading-subtext {
+        color: #9CA3AF;
+      }
+      
+      /* Progress bar */
+      .loading-progress {
+        width: 200px;
+        height: 4px;
+        background: rgba(59, 130, 246, 0.1);
+        border-radius: 2px;
+        margin: 1.5rem auto 0;
+        overflow: hidden;
+        position: relative;
+      }
+      
+      .loading-progress::after {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        height: 100%;
+        width: 40%;
+        background: linear-gradient(90deg, #3B82F6, #10B981);
+        border-radius: 2px;
+        animation: progress 1.5s ease-in-out infinite;
+      }
+      
+      @keyframes progress {
+        0% { left: -40%; }
+        50% { left: 100%; }
+        100% { left: 100%; }
+      }
+      
+      /* Quote carousel */
+      .loading-quote {
+        margin-top: 2rem;
+        max-width: 300px;
+        min-height: 60px;
+      }
+      
+      .quote-text {
+        font-size: 0.875rem;
+        color: #4B5563;
+        font-style: italic;
+        transition: opacity 0.5s ease;
+      }
+      
+      body.dark .quote-text {
+        color: #9CA3AF;
+      }
+      
+      .quote-author {
+        font-size: 0.75rem;
+        color: #3B82F6;
+        margin-top: 0.25rem;
+        font-weight: 500;
+      }
+      
+      /* Hide loading spinner when React mounts */
+      .loaded .loading-container {
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.3s ease;
+      }
+      
+      /* Accessibility - focus styles */
+      :focus-visible {
+        outline: 2px solid #3B82F6;
+        outline-offset: 2px;
+      }
+      
+      /* Smooth transitions */
+      a, button {
+        transition: all 0.2s ease;
+        cursor: pointer;
+      }
+      
+      /* Scrollbar styling */
+      ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      
+      ::-webkit-scrollbar-track {
+        background: #f1f1f1;
+        border-radius: 5px;
+      }
+      
+      ::-webkit-scrollbar-thumb {
+        background: #cbd5e1;
+        border-radius: 5px;
+        border: 2px solid #f1f1f1;
+      }
+      
+      ::-webkit-scrollbar-thumb:hover {
+        background: #94a3b8;
+      }
+      
+      .dark ::-webkit-scrollbar-track {
+        background: #1f2937;
+      }
+      
+      .dark ::-webkit-scrollbar-thumb {
+        background: #4b5563;
+        border-color: #1f2937;
+      }
+      
+      .dark ::-webkit-scrollbar-thumb:hover {
+        background: #6b7280;
+      }
+      
+      /* Print styles */
+      @media print {
+        .no-print {
+          display: none !important;
+        }
+        
+        body, body.dark {
+          background: white;
+          color: black;
+        }
+        
+        body::before, body::after {
+          display: none;
+        }
+      }
+      
+      /* Reduced motion preferences */
+      @media (prefers-reduced-motion: reduce) {
+        html, body {
+          scroll-behavior: auto;
+        }
+        
+        .loading-spinner,
+        .loading-logo,
+        .loading-text,
+        .loading-progress::after,
+        body::before,
+        body::after {
+          animation: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <!-- Enhanced Loading indicator - will be replaced by React app -->
+      <div class="loading-container">
+        <!-- Logo -->
+        <div class="loading-logo">
+          <img src="/assets/logo.png" alt="MediCare Plus" />
+        </div>
+        
+        <!-- Spinner -->
+        <div class="loading-spinner"></div>
+        
+        <!-- Loading text -->
+        <div class="loading-text">MediCare Plus</div>
+        <div class="loading-subtext">Loading your healthcare experience...</div>
+        
+        <!-- Progress bar -->
+        <div class="loading-progress"></div>
+        
+        <!-- Inspirational quotes carousel -->
+        <div class="loading-quote" id="quoteContainer">
+          <div class="quote-text" id="quoteText">Your health is our priority</div>
+          <div class="quote-author" id="quoteAuthor">- MediCare Plus</div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Firebase configuration will be injected via environment variables -->
+    <script type="module" src="/src/main.jsx"></script>
+    
+    <!-- Service Worker for PWA capabilities -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js')
+            .then(registration => {
+              console.log('✅ ServiceWorker registered:', registration.scope);
+            })
+            .catch(error => {
+              console.log('❌ ServiceWorker registration failed:', error);
+            });
+        });
+      }
+      
+      // Check for updates
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.ready.then(registration => {
+          registration.update();
+        });
+      }
+    </script>
+    
+    <!-- Inspirational quotes for loading screen -->
+    <script>
+      const quotes = [
+        { text: "Your health is our priority", author: "MediCare Plus" },
+        { text: "Caring for you, every step of the way", author: "MediCare Plus" },
+        { text: "Modern healthcare at your fingertips", author: "MediCare Plus" },
+        { text: "Empowering better health decisions", author: "MediCare Plus" },
+        { text: "Your medical journey, simplified", author: "MediCare Plus" },
+        { text: "Quality care, compassionate service", author: "MediCare Plus" },
+        { text: "Healing with heart and technology", author: "MediCare Plus" },
+        { text: "Because you deserve the best care", author: "MediCare Plus" }
+      ];
+      
+      let quoteIndex = 0;
+      const quoteText = document.getElementById('quoteText');
+      const quoteAuthor = document.getElementById('quoteAuthor');
+      
+      function rotateQuote() {
+        if (quoteText && quoteAuthor) {
+          // Fade out
+          quoteText.style.opacity = '0';
+          quoteAuthor.style.opacity = '0';
+          
+          setTimeout(() => {
+            quoteIndex = (quoteIndex + 1) % quotes.length;
+            quoteText.textContent = quotes[quoteIndex].text;
+            quoteAuthor.textContent = `- ${quotes[quoteIndex].author}`;
+            
+            // Fade in
+            quoteText.style.opacity = '1';
+            quoteAuthor.style.opacity = '1';
+          }, 300);
+        }
+      }
+      
+      // Rotate quotes every 3 seconds
+      setInterval(rotateQuote, 3000);
+    </script>
+    
+    <!-- Performance monitoring -->
+    <script>
+      // Report Web Vitals
+      function sendToAnalytics(metric) {
+        // You can send this to your analytics service
+        console.log('📊 Web Vital:', metric.name, metric.value);
+      }
+      
+      // Load web-vitals dynamically
+      if ('web-vital' in window) {
+        window.webVital.getCLS(sendToAnalytics);
+        window.webVital.getFID(sendToAnalytics);
+        window.webVital.getLCP(sendToAnalytics);
+        window.webVital.getFCP(sendToAnalytics);
+        window.webVital.getTTFB(sendToAnalytics);
+      }
+    </script>
+    
+    <!-- Add offline detection and notification -->
+    <script>
+      window.addEventListener('online', () => {
+        document.body.classList.remove('offline');
+        console.log('✅ Connection restored');
+        
+        // Show toast notification if React is not yet loaded
+        if (!window.__REACT_LOADED__) {
+          const offlineNotification = document.createElement('div');
+          offlineNotification.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #10B981;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            z-index: 1000;
+            animation: slideIn 0.3s ease;
+          `;
+          offlineNotification.textContent = '🟢 Connection restored';
+          document.body.appendChild(offlineNotification);
+          setTimeout(() => offlineNotification.remove(), 3000);
+        }
+      });
+      
+      window.addEventListener('offline', () => {
+        document.body.classList.add('offline');
+        console.log('❌ Connection lost');
+        
+        // Show toast notification if React is not yet loaded
+        if (!window.__REACT_LOADED__) {
+          const offlineNotification = document.createElement('div');
+          offlineNotification.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #EF4444;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            z-index: 1000;
+            animation: slideIn 0.3s ease;
+          `;
+          offlineNotification.textContent = '🔴 You are offline';
+          document.body.appendChild(offlineNotification);
+          setTimeout(() => offlineNotification.remove(), 3000);
+        }
+      });
+      
+      // Add slideIn animation
+      const style = document.createElement('style');
+      style.textContent = `
+        @keyframes slideIn {
+          from {
+            transform: translateX(100%);
+            opacity: 0;
+          }
+          to {
+            transform: translateX(0);
+            opacity: 1;
+          }
+        }
+      `;
+      document.head.appendChild(style);
+    </script>
+    
+<!-- Preload critical assets with proper module handling -->
+<link rel="modulepreload" href="/src/main.jsx" />
+<link rel="preload" href="/assets/logo.png" as="image" />
+<link rel="preload" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" as="style" />
+    
+    <!-- Dark mode detection -->
+    <script>
+      // Check for saved dark mode preference
+      const darkMode = localStorage.getItem('darkMode');
+      if (darkMode === 'true' || (!darkMode && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        document.body.classList.add('dark');
+      }
+      
+      // Listen for system theme changes
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
+        if (!localStorage.getItem('darkMode')) {
+          if (e.matches) {
+            document.body.classList.add('dark');
+          } else {
+            document.body.classList.remove('dark');
+          }
+        }
+      });
+    </script>
+    
+    <!-- Set React loaded flag -->
+    <script>
+      window.__REACT_LOADED__ = false;
+      
+      // This will be called when React mounts
+      window.addEventListener('load', () => {
+        setTimeout(() => {
+          window.__REACT_LOADED__ = true;
+          document.body.classList.add('loaded');
+        }, 100);
+      });
+    </script>
+  </body>
+</html>
