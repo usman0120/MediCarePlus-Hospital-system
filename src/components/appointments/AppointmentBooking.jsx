@@ -22,7 +22,13 @@ import { validateAppointment } from '../../utils/validators';
 import { formatCurrency } from '../../utils/helpers';
 import toast from 'react-hot-toast';
 
-const AppointmentBooking = ({ patientId, onSuccess, onCancel }) => {
+const AppointmentBooking = ({ 
+  patientId, 
+  onSuccess, 
+  onCancel, 
+  initialDoctorId = null, 
+  initialDepartmentId = null 
+}) => {
   const [loading, setLoading] = useState(false);
   const [checkingSlot, setCheckingSlot] = useState(false);
   const [departments, setDepartments] = useState([]);
@@ -31,8 +37,9 @@ const AppointmentBooking = ({ patientId, onSuccess, onCancel }) => {
   const [availableSlots, setAvailableSlots] = useState([]);
   const [selectedSlot, setSelectedSlot] = useState(null);
   const [doctorSchedule, setDoctorSchedule] = useState([]);
-  // eslint-disable-next-line no-unused-vars
-  const [specializations, setSpecializations] = useState([]);
+  const [, setSpecializations] = useState([]);
+  const [doctorsLoaded, setDoctorsLoaded] = useState(false);
+  const [departmentsLoaded, setDepartmentsLoaded] = useState(false);
   const [formData, setFormData] = useState({
     departmentId: '',
     doctorId: '',
@@ -43,20 +50,15 @@ const AppointmentBooking = ({ patientId, onSuccess, onCancel }) => {
   });
   const [errors, setErrors] = useState({});
   
-  // Use refs to track mounted state and prevent state updates after unmount
   const isMounted = useRef(true);
   
   useEffect(() => {
-    // Set mounted flag
     isMounted.current = true;
-    
-    // Cleanup function
     return () => {
       isMounted.current = false;
     };
   }, []);
 
-  // Safe state setter
   const safeSetState = (setter, value) => {
     if (isMounted.current) {
       setter(value);
@@ -70,25 +72,23 @@ const AppointmentBooking = ({ patientId, onSuccess, onCancel }) => {
         const result = await getPublicDepartments();
         if (result.success && isMounted.current) {
           safeSetState(setDepartments, result.data);
+          safeSetState(setDepartmentsLoaded, true);
         }
       } catch (error) {
         console.error('Error fetching departments:', error);
       }
     };
-    
     fetchDepartments();
-  }, []); // Empty dependency array - only runs once
+  }, []);
 
   // Fetch all active doctors on mount
   useEffect(() => {
     const fetchDoctors = async () => {
       safeSetState(setLoading, true);
       try {
-        // Fetch only doctors with active status using getUsersByRole
         const result = await getUsersByRole('doctor');
         
         if (result.success && isMounted.current) {
-          // Filter only active doctors and map to public-friendly format
           const activeDoctors = result.data
             .filter(doc => doc.accountStatus === 'active')
             .map(doc => ({
@@ -112,8 +112,8 @@ const AppointmentBooking = ({ patientId, onSuccess, onCancel }) => {
             }));
 
           safeSetState(setDoctors, activeDoctors);
+          safeSetState(setDoctorsLoaded, true);
           
-          // Extract unique specializations for potential filter
           const specs = [...new Set(activeDoctors.map(d => d.specialization).filter(Boolean))];
           safeSetState(setSpecializations, specs.sort());
         } else {
@@ -128,9 +128,35 @@ const AppointmentBooking = ({ patientId, onSuccess, onCancel }) => {
         }
       }
     };
-    
     fetchDoctors();
-  }, []); // Empty dependency array - only runs once
+  }, []);
+
+  // Set initial doctor and department when both are loaded
+  useEffect(() => {
+    if (initialDoctorId && doctorsLoaded && departmentsLoaded && doctors.length > 0 && departments.length > 0) {
+      const doctor = doctors.find(d => d.id === initialDoctorId);
+      if (doctor) {
+        // Find department by doctor's department name or ID
+        let dept = departments.find(d => d.name === doctor.department || d.id === doctor.department);
+        
+        // If not found, try to find department by name match
+        if (!dept && doctor.department) {
+          dept = departments.find(d => d.name?.toLowerCase() === doctor.department?.toLowerCase());
+        }
+        
+        setFormData(prev => ({
+          ...prev,
+          doctorId: doctor.id,
+          departmentId: dept?.id || initialDepartmentId || ''
+        }));
+      } else if (initialDepartmentId) {
+        setFormData(prev => ({
+          ...prev,
+          departmentId: initialDepartmentId
+        }));
+      }
+    }
+  }, [initialDoctorId, initialDepartmentId, doctorsLoaded, departmentsLoaded, doctors, departments]);
 
   // Filter doctors when department changes
   useEffect(() => {
@@ -139,11 +165,9 @@ const AppointmentBooking = ({ patientId, onSuccess, onCancel }) => {
       return;
     }
     
-    // Find department name from ID
     const selectedDept = departments.find(d => d.id === formData.departmentId);
     
     if (selectedDept) {
-      // Filter doctors by department name or department ID
       const filtered = doctors.filter(doc => 
         doc.department === selectedDept.name || 
         doc.department === formData.departmentId
@@ -152,7 +176,7 @@ const AppointmentBooking = ({ patientId, onSuccess, onCancel }) => {
     }
   }, [formData.departmentId, doctors, departments]);
 
-  // Fetch slots and schedule when doctor and date change
+  // Fetch slots when doctor and date change
   useEffect(() => {
     const fetchSlotsAndSchedule = async () => {
       if (!formData.doctorId || !formData.date) {
@@ -164,7 +188,6 @@ const AppointmentBooking = ({ patientId, onSuccess, onCancel }) => {
       safeSetState(setCheckingSlot, true);
       
       try {
-        // Fetch both in parallel
         const [slotsResult, scheduleResult] = await Promise.all([
           getAvailableTimeSlots(formData.doctorId, formData.date),
           getDoctorSchedule(formData.doctorId, formData.date)
@@ -188,7 +211,7 @@ const AppointmentBooking = ({ patientId, onSuccess, onCancel }) => {
     };
     
     fetchSlotsAndSchedule();
-  }, [formData.doctorId, formData.date]); // Only depends on doctorId and date
+  }, [formData.doctorId, formData.date]);
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -198,7 +221,6 @@ const AppointmentBooking = ({ patientId, onSuccess, onCancel }) => {
         [name]: type === 'checkbox' ? checked : value
       };
       
-      // Reset time and slot when doctor or date changes
       if (name === 'doctorId' || name === 'date') {
         newData.time = '';
         setSelectedSlot(null);
@@ -207,7 +229,6 @@ const AppointmentBooking = ({ patientId, onSuccess, onCancel }) => {
       return newData;
     });
     
-    // Clear error for this field
     if (errors[name]) {
       setErrors(prev => ({ ...prev, [name]: null }));
     }
@@ -223,74 +244,71 @@ const AppointmentBooking = ({ patientId, onSuccess, onCancel }) => {
     setErrors(prev => ({ ...prev, time: null }));
   };
 
-const handleSubmit = async (e) => {
-  e.preventDefault();
-  
-  // Transform formData to match validation schema
-  const validationData = {
-    department: formData.departmentId,
-    doctorId: formData.doctorId,
-    date: formData.date,
-    time: formData.time,
-    reason: formData.reason
-  };
-
-  // Validate form
-  const validation = validateAppointment(validationData);
-  if (!validation.isValid) {
-    setErrors({
-      departmentId: validation.errors.department,
-      doctorId: validation.errors.doctorId,
-      date: validation.errors.date,
-      time: validation.errors.time,
-      reason: validation.errors.reason
-    });
-    const firstError = Object.values(validation.errors)[0];
-    if (firstError) toast.error(firstError);
-    return;
-  }
-
-  setLoading(true);
-
-  try {
-    // IMPORTANT: Ensure all required fields are included with correct field names
-    const appointmentData = {
-      patientId,
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    
+    const validationData = {
+      department: formData.departmentId,
       doctorId: formData.doctorId,
-      department: formData.departmentId, // This will be stored as department
       date: formData.date,
       time: formData.time,
-      reason: formData.reason,
-      isEmergency: formData.isEmergency || false
+      reason: formData.reason
     };
 
-    console.log('Sending appointment data:', appointmentData); // Debug log
+    const validation = validateAppointment(validationData);
+    if (!validation.isValid) {
+      setErrors({
+        departmentId: validation.errors.department,
+        doctorId: validation.errors.doctorId,
+        date: validation.errors.date,
+        time: validation.errors.time,
+        reason: validation.errors.reason
+      });
+      const firstError = Object.values(validation.errors)[0];
+      if (firstError) toast.error(firstError);
+      return;
+    }
 
-    const result = await createAppointment(appointmentData);
+    setLoading(true);
 
-    if (result.success && isMounted.current) {
-      toast.success(
-        <div>
-          <p className="font-medium">Appointment request submitted!</p>
-          <p className="text-sm mt-1">Waiting for approval from reception.</p>
-        </div>,
-        { duration: 5000 }
-      );
-      if (onSuccess) onSuccess(result.data);
-    } else if (isMounted.current) {
-      toast.error(result.error || 'Failed to book appointment');
+    try {
+      const appointmentData = {
+        patientId,
+        doctorId: formData.doctorId,
+        department: formData.departmentId,
+        date: formData.date,
+        time: formData.time,
+        reason: formData.reason,
+        isEmergency: formData.isEmergency || false
+      };
+
+      console.log('Sending appointment data:', appointmentData);
+
+      const result = await createAppointment(appointmentData);
+
+      if (result.success && isMounted.current) {
+        toast.success(
+          <div>
+            <p className="font-medium">Appointment request submitted!</p>
+            <p className="text-sm mt-1">Waiting for approval from reception.</p>
+          </div>,
+          { duration: 5000 }
+        );
+        if (onSuccess) onSuccess(result.data);
+      } else if (isMounted.current) {
+        toast.error(result.error || 'Failed to book appointment');
+      }
+    } catch (error) {
+      if (isMounted.current) {
+        toast.error('Failed to book appointment');
+      }
+      console.error('Error booking appointment:', error);
+    } finally {
+      if (isMounted.current) {
+        setLoading(false);
+      }
     }
-  } catch (error) {
-    if (isMounted.current) {
-      toast.error('Failed to book appointment');
-    }
-    console.error('Error booking appointment:', error);
-  } finally {
-    if (isMounted.current) {
-      setLoading(false);
-    }
-  }
-};
+  };
 
   const getTodayDate = () => {
     const today = new Date();
@@ -299,7 +317,7 @@ const handleSubmit = async (e) => {
 
   const getMaxDate = () => {
     const max = new Date();
-    max.setMonth(max.getMonth() + 3); // Allow booking up to 3 months ahead
+    max.setMonth(max.getMonth() + 3);
     return max.toISOString().split('T')[0];
   };
 
@@ -307,7 +325,6 @@ const handleSubmit = async (e) => {
     return doctorSchedule.some(apt => apt.time === time && apt.status !== 'cancelled');
   };
 
-  // Render star rating
   const renderRating = (rating) => {
     const stars = [];
     const fullStars = Math.floor(rating);
@@ -321,6 +338,18 @@ const handleSubmit = async (e) => {
     }
     return stars;
   };
+
+  // Show loading until initial data is loaded
+  if (!doctorsLoaded || !departmentsLoaded) {
+    return (
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 flex justify-center">
+        <div className="text-center">
+          <FontAwesomeIcon icon={faSpinner} className="animate-spin text-blue-600 text-3xl mb-3" />
+          <p className="text-gray-600 dark:text-gray-400">Loading...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
@@ -349,29 +378,29 @@ const handleSubmit = async (e) => {
           )}
         </div>
 
-{/* Department Selection */}
-<div>
-  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-    <FontAwesomeIcon icon={faBuilding} className="mr-2" />
-    Department *
-  </label>
-  <select
-    name="departmentId"
-    value={formData.departmentId}
-    onChange={handleChange}
-    className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white ${
-      errors.departmentId ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
-    }`}
-  >
-    <option value="">Select Department</option>
-    {departments.map(dept => (
-      <option key={dept.id} value={dept.id}>{dept.name}</option>
-    ))}
-  </select>
-  {errors.departmentId && (
-    <p className="mt-1 text-sm text-red-600">{errors.departmentId}</p>
-  )}
-</div>
+        {/* Department Selection */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+            <FontAwesomeIcon icon={faBuilding} className="mr-2" />
+            Department *
+          </label>
+          <select
+            name="departmentId"
+            value={formData.departmentId}
+            onChange={handleChange}
+            className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white ${
+               errors.departmentId ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
+            }`}
+          >
+            <option value="">Select Department</option>
+            {departments.map(dept => (
+              <option key={dept.id} value={dept.id}>{dept.name}</option>
+            ))}
+          </select>
+          {errors.departmentId && (
+            <p className="mt-1 text-sm text-red-600">{errors.departmentId}</p>
+          )}
+        </div>
 
         {/* Doctor Selection */}
         <div>
@@ -562,6 +591,7 @@ const handleSubmit = async (e) => {
           <p className="text-xs text-yellow-800 dark:text-yellow-200 text-center">
             <FontAwesomeIcon icon={faExclamationTriangle} className="mr-1" />
             Your appointment request will be sent for approval. You'll be notified once confirmed.
+            Payment is required after approval to confirm the appointment.
           </p>
         </div>
       </form>

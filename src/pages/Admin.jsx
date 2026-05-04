@@ -100,9 +100,6 @@ import DepartmentDetailsModal from '../components/DepartmentDetailsModal';
 import PricingControlsModal from '../components/PricingControlsModal';
 import HospitalHistoryModal from '../components/HospitalHistoryModal';
 import SupportMessages from '../components/SupportMessages';
-import SalaryPaymentModule from '../components/SalaryPaymentModule';
-import SalaryCalculationModule from '../components/SalaryCalculationModule';
-import AttendanceModule from '../components/AttendanceModule';
 import DeactivationRequests from '../components/DeactivationRequests';
 
 ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, Title, PointElement, LineElement);
@@ -136,7 +133,6 @@ const Admin = () => {
   const [showHospitalHistoryModal, setShowHospitalHistoryModal] = useState(false);
   const [hospitalHistory, setHospitalHistory] = useState(null);
   const [yearlyStats, setYearlyStats] = useState([]);
-  const [salaryTab, setSalaryTab] = useState('pending');
   const [profileImage, setProfileImage] = useState(null);
 const [imagePreview, setImagePreview] = useState(null);
 const [imageError, setImageError] = useState('');
@@ -206,6 +202,15 @@ const [pendingDeactivationCount, setPendingDeactivationCount] = useState(0);
 
   // State for password reset
   const [resettingPassword, setResettingPassword] = useState(null);
+  // Salary Records State (Admin view-only)
+const [salaryRecords, setSalaryRecords] = useState([]);
+const [loadingRecords, setLoadingRecords] = useState(false);
+const [salaryStats, setSalaryStats] = useState({
+  totalPaid: 0,
+  totalPending: 0,
+  thisMonthTotal: 0,
+  averageSalary: 0
+});
 
   // ==================== DATA FETCHING FUNCTIONS ====================
 
@@ -489,7 +494,45 @@ const [pendingDeactivationCount, setPendingDeactivationCount] = useState(0);
     }
   }, [activeTab, fetchAnalytics, fetchAlerts, fetchBeds, fetchOperations, fetchStaff, fetchDepartments, fetchAuditLogs, fetchPatients, fetchPricingConfig, fetchPendingDeactivationCount]);
 
+  const fetchSalaryRecords = useCallback(async () => {
+  setLoadingRecords(true);
+  try {
+    const { getSalaryRecords } = await import('../database');
+    
+    const recordsResult = await getSalaryRecords({});
+    if (recordsResult.success) {
+      setSalaryRecords(recordsResult.data || []);
+      
+      const paid = recordsResult.data?.filter(r => r.status === 'paid') || [];
+      const pending = recordsResult.data?.filter(r => r.status === 'pending') || [];
+      const thisMonth = recordsResult.data?.filter(r => 
+        r.month === new Date().getMonth() + 1 && 
+        r.year === new Date().getFullYear()
+      ) || [];
+      
+      setSalaryStats({
+        totalPaid: paid.reduce((sum, r) => sum + (r.calculatedSalary || 0), 0),
+        totalPending: pending.reduce((sum, r) => sum + (r.calculatedSalary || 0), 0),
+        thisMonthTotal: thisMonth.reduce((sum, r) => sum + (r.calculatedSalary || 0), 0),
+        averageSalary: recordsResult.data?.length ? 
+          recordsResult.data.reduce((sum, r) => sum + (r.calculatedSalary || 0), 0) / recordsResult.data.length : 0
+      });
+    }
+  } catch (error) {
+    console.error('Error fetching salary records:', error);
+    toast.error('Failed to load salary records');
+  } finally {
+    setLoadingRecords(false);
+  }
+}, []);
+
   // ==================== EFFECTS ====================
+
+  useEffect(() => {
+  if (activeTab === 'salary') {
+    fetchSalaryRecords();
+  }
+}, [activeTab, fetchSalaryRecords]);
 
   useEffect(() => {
     fetchHospitalHistory();
@@ -547,6 +590,34 @@ const [pendingDeactivationCount, setPendingDeactivationCount] = useState(0);
   };
 
   // ==================== HANDLER FUNCTIONS ====================
+
+  const handleExportSalaryHistory = async () => {
+  try {
+    const { exportCollection } = await import('../database');
+    const result = await exportCollection('salaryRecords');
+    if (result.success) {
+      let dataToExport = result.data;
+      if (typeof dataToExport === 'string' && dataToExport.includes('base64')) {
+        const jsonString = atob(dataToExport);
+        dataToExport = JSON.parse(jsonString);
+      }
+      const blob = new Blob([JSON.stringify(dataToExport, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `salary-history-${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success('Salary history exported successfully');
+    } else {
+      toast.error(result.error || 'Failed to export salary history');
+    }
+  } catch (error) {
+    console.error('Error exporting salary history:', error);
+    toast.error('Failed to export salary history');
+  }
+};
+
 
   const handleImageUpload = async (e) => {
   const file = e.target.files[0];
@@ -1905,114 +1976,171 @@ const resetForm = () => {
   );
 
 
-  const renderSalaryManagement = () => (
-  <div className="space-y-6">
-    <div className="flex justify-between items-center">
-      <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Salary Management</h2>
-    </div>
-
-    {/* Sub-tabs for salary management */}
-    <div className="border-b border-gray-200 dark:border-gray-700">
-      <nav className="flex space-x-4 overflow-x-auto pb-1">
+const renderSalaryManagement = () => {
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+        <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Salary Records & History</h2>
         <button
-          onClick={() => setSalaryTab('pending')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
-            salaryTab === 'pending'
-              ? 'border-blue-600 text-blue-600 dark:text-blue-400'
-              : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
-          }`}
+          onClick={handleExportSalaryHistory}
+          className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition flex items-center"
         >
-          Pending Payments
-        </button>
-        <button
-          onClick={() => setSalaryTab('calculated')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
-            salaryTab === 'calculated'
-              ? 'border-blue-600 text-blue-600 dark:text-blue-400'
-              : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
-          }`}
-        >
-          Salary Calculation
-        </button>
-        <button
-          onClick={() => setSalaryTab('attendance')}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition ${
-            salaryTab === 'attendance'
-              ? 'border-blue-600 text-blue-600 dark:text-blue-400'
-              : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
-          }`}
-        >
-          Attendance Overview
-        </button>
-      </nav>
-    </div>
-
-    {/* Render appropriate module based on selected tab */}
-    <div className="mt-6">
-      {salaryTab === 'pending' && (
-        <SalaryPaymentModule
-          onPaymentProcessed={(record) => {
-            toast.success(`Payment processed for ${record.userName}`);
-            // Refresh data if needed
-          }}
-        />
-      )}
-      {salaryTab === 'calculated' && (
-        <SalaryCalculationModule
-          onCalculated={(records) => {
-            toast.success(`Salaries calculated for ${records.length} staff members`);
-          }}
-        />
-      )}
-      {salaryTab === 'attendance' && (
-        <AttendanceModule
-          onAttendanceMarked={(record) => {
-            toast.success(`Attendance marked for ${record.fullName}`);
-          }}
-        />
-      )}
-    </div>
-
-    {/* Admin Quick Actions */}
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 mt-6">
-      <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Salary Administration</h3>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <button
-          onClick={() => {
-            // Navigate to accountant portal or show full salary report
-            toast.info('View full salary report - Navigate to Accountant portal');
-          }}
-          className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-blue-500 transition group"
-        >
-          <FontAwesomeIcon icon={faFileExport} className="h-8 w-8 text-gray-400 group-hover:text-blue-500 mb-2" />
-          <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Export Salary Report</p>
-        </button>
-        
-        <button
-          onClick={() => {
-            // Show salary analytics
-            toast.info('Salary analytics coming soon');
-          }}
-          className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-green-500 transition group"
-        >
-          <FontAwesomeIcon icon={faChartLine} className="h-8 w-8 text-gray-400 group-hover:text-green-500 mb-2" />
-          <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Salary Analytics</p>
-        </button>
-        
-        <button
-          onClick={() => {
-            // Override salary
-            toast.info('Salary override - Admin only action');
-          }}
-          className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-purple-500 transition group"
-        >
-          <FontAwesomeIcon icon={faEdit} className="h-8 w-8 text-gray-400 group-hover:text-purple-500 mb-2" />
-          <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Manual Override</p>
+          <FontAwesomeIcon icon={faFileExport} className="mr-2" />
+          Export History
         </button>
       </div>
+
+      {/* Salary Statistics Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
+          <p className="text-sm text-gray-600 dark:text-gray-400">Total Paid Salary</p>
+          <p className="text-2xl font-bold text-green-600">{formatCurrency(salaryStats.totalPaid)}</p>
+        </div>
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
+          <p className="text-sm text-gray-600 dark:text-gray-400">Pending Payments</p>
+          <p className="text-2xl font-bold text-yellow-600">{formatCurrency(salaryStats.totalPending)}</p>
+        </div>
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
+          <p className="text-sm text-gray-600 dark:text-gray-400">This Month Total</p>
+          <p className="text-2xl font-bold text-blue-600">{formatCurrency(salaryStats.thisMonthTotal)}</p>
+        </div>
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-5">
+          <p className="text-sm text-gray-600 dark:text-gray-400">Average Salary</p>
+          <p className="text-2xl font-bold text-purple-600">{formatCurrency(salaryStats.averageSalary)}</p>
+        </div>
+      </div>
+
+      {/* Info Note */}
+      <div className="bg-blue-50 dark:bg-blue-900/30 rounded-lg p-4">
+        <div className="flex items-start">
+          <FontAwesomeIcon icon={faInfoCircle} className="text-blue-600 dark:text-blue-400 mr-3 mt-0.5" />
+          <div>
+            <p className="text-sm text-blue-800 dark:text-blue-200 font-medium">About Salary Management</p>
+            <p className="text-xs text-blue-700 dark:text-blue-300 mt-1">
+              Salary calculations, payments, and attendance marking are managed in the Accountant portal.
+              As an admin, you can view salary history and records here. For detailed salary operations,
+              please navigate to the Accountant section.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Salary Records Table */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+        <div className="px-4 sm:px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center">
+            <FontAwesomeIcon icon={faHistory} className="mr-2 text-purple-500" />
+            Salary Payment History
+          </h3>
+        </div>
+        
+        {loadingRecords ? (
+          <div className="flex justify-center items-center p-12">
+            <FontAwesomeIcon icon={faSpinner} className="animate-spin text-blue-600 text-2xl" />
+          </div>
+        ) : salaryRecords.length === 0 ? (
+          <div className="p-12 text-center">
+            <FontAwesomeIcon icon={faMoneyCheck} className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+            <p className="text-gray-600 dark:text-gray-400">No salary records found</p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+              <thead className="bg-gray-50 dark:bg-gray-900">
+                <tr>
+                  <th className="px-3 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Employee</th>
+                  <th className="px-3 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
+                  <th className="px-3 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Department</th>
+                  <th className="px-3 sm:px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Period</th>
+                  <th className="px-3 sm:px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Base Salary</th>
+                  <th className="px-3 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Working Days</th>
+                  <th className="px-3 sm:px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Net Salary</th>
+                  <th className="px-3 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
+                  <th className="px-3 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Payment Date</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                {salaryRecords.slice(0, 50).map((record) => (
+                  <tr key={record.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                    <td className="px-3 sm:px-6 py-4 whitespace-nowrap">
+                      <div className="text-sm font-medium text-gray-900 dark:text-white">{record.userName || 'N/A'}</div>
+                      <div className="text-xs text-gray-500">ID: {record.userId?.slice(-6)}</div>
+                    </td>
+                    <td className="px-3 sm:px-6 py-4 whitespace-nowrap">
+                      <span className="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded-full text-xs capitalize">
+                        {record.userRole || 'Staff'}
+                      </span>
+                    </td>
+                    <td className="px-3 sm:px-6 py-4 whitespace-nowrap text-sm text-gray-600 dark:text-gray-400">
+                      {record.userDepartment || 'N/A'}
+                    </td>
+                    <td className="px-3 sm:px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
+                      {record.month}/{record.year}
+                    </td>
+                    <td className="px-3 sm:px-6 py-4 whitespace-nowrap text-right text-sm text-gray-600">
+                      {formatCurrency(record.baseSalary)}
+                    </td>
+                    <td className="px-3 sm:px-6 py-4 whitespace-nowrap text-center text-sm text-gray-900 dark:text-white">
+                      {record.workingDays || 0}
+                    </td>
+                    <td className="px-3 sm:px-6 py-4 whitespace-nowrap text-right">
+                      <span className="text-sm font-bold text-green-600">{formatCurrency(record.calculatedSalary)}</span>
+                    </td>
+                    <td className="px-3 sm:px-6 py-4 whitespace-nowrap text-center">
+                      <span className={`px-2 py-1 rounded-full text-xs ${
+                        record.status === 'paid' 
+                          ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+                          : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
+                      }`}>
+                        {record.status}
+                      </span>
+                    </td>
+                    <td className="px-3 sm:px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                      {record.paidAt ? formatDate(record.paidAt.toDate?.() || record.paidAt) : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {salaryRecords.length > 50 && (
+              <div className="px-6 py-4 text-center text-sm text-gray-500 border-t">
+                Showing 50 most recent records. Full history available in Accountant portal.
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Quick Links */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Quick Actions</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <button
+            onClick={() => {
+              toast.info('Navigate to Accountant portal for salary calculations and payments');
+            }}
+            className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-blue-500 transition group text-center"
+          >
+            <FontAwesomeIcon icon={faCalculator} className="h-8 w-8 text-gray-400 group-hover:text-blue-500 mb-2" />
+            <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Salary Calculations</p>
+            <p className="text-xs text-gray-400 mt-1">Manage in Accountant Portal</p>
+          </button>
+          
+          <button
+            onClick={() => {
+              toast.info('Navigate to Accountant portal for attendance management');
+            }}
+            className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-green-500 transition group text-center"
+          >
+            <FontAwesomeIcon icon={faUserClock} className="h-8 w-8 text-gray-400 group-hover:text-green-500 mb-2" />
+            <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Attendance Management</p>
+            <p className="text-xs text-gray-400 mt-1">Manage in Accountant Portal</p>
+          </button>
+        </div>
+      </div>
     </div>
-  </div>
-);
+  );
+};
   const renderPricing = () => (
     <div className="space-y-6">
       <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Pricing Controls</h2>

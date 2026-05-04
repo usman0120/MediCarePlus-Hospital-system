@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { useNavigate } from 'react-router-dom';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
@@ -8,6 +8,7 @@ import {
   faBoxes,
   faShoppingCart,
   faMoneyBillWave,
+  faClock,
   faPlus,
   faSpinner,
   faSignOutAlt,
@@ -24,7 +25,14 @@ import {
   faInfoCircle,
   faMoneyCheck,
   faWallet,
-  faDownload
+  faDownload,
+  faUsers,
+  faBuilding,
+  faReceipt,
+  faHistory,
+  faBell,
+  faArrowLeft,
+  faArrowRight
 } from '@fortawesome/free-solid-svg-icons';
 import { logoutUser } from '../auth';
 import {
@@ -43,9 +51,6 @@ import {
   getExpensesByCategory,
   addExpense,
   
-  // Salary
-  getPendingSalaryRecords,
-  
   // Department
   getDepartments,
   setDepartmentBudget,
@@ -54,7 +59,12 @@ import {
   getPendingAlerts,
   
   // Export
-  exportCollection
+  exportCollection,
+  
+  // Enhanced Salary Functions
+  getSalaryRecords,
+  getPreviousSalariesSummary,
+  getAllStaffForAttendance
 } from '../database';
 import { formatDate, formatCurrency } from '../utils/helpers';
 import toast from 'react-hot-toast';
@@ -63,8 +73,7 @@ import { Pie, Line, Bar } from 'react-chartjs-2';
 import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
 
-// Import Salary Management Modules
-import SalaryPaymentModule from '../components/SalaryPaymentModule';
+// Import the merged Salary Calculation Module
 import SalaryCalculationModule from '../components/SalaryCalculationModule';
 import AttendanceModule from '../components/AttendanceModule';
 
@@ -73,20 +82,29 @@ ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarEle
 const Accountant = () => {
   const { currentUser, userDetails } = useAuth();
   const navigate = useNavigate();
+  
+  // State for view management
   const [activeTab, setActiveTab] = useState('dashboard');
-  const [salaryTab, setSalaryTab] = useState('pending'); // For salary sub-tabs
+  const [salaryView, setSalaryView] = useState('calculation'); // calculation, history
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [dateRange, setDateRange] = useState({
     start: new Date(new Date().setDate(new Date().getDate() - 30)),
     end: new Date()
   });
   const [selectedStatus, setSelectedStatus] = useState('all');
+  const [selectedPeriod, setSelectedPeriod] = useState({
+    month: new Date().getMonth() + 1,
+    year: new Date().getFullYear()
+  });
 
   // Modal states
   const [showExpenseModal, setShowExpenseModal] = useState(false);
   const [showPurchaseModal, setShowPurchaseModal] = useState(false);
   const [showBudgetModal, setShowBudgetModal] = useState(false);
   const [showReportModal, setShowReportModal] = useState(false);
+  const [showSalaryHistoryModal, setShowSalaryHistoryModal] = useState(false);
+  const [selectedSalaryHistory, setSelectedSalaryHistory] = useState(null);
 
   // Data states
   const [inventoryData, setInventoryData] = useState({
@@ -102,13 +120,16 @@ const Accountant = () => {
   });
   
   const [purchaseOrders, setPurchaseOrders] = useState([]);
-  const [pendingSalaries, setPendingSalaries] = useState([]);
   const [departments, setDepartments] = useState([]);
   const [, setFinancialSummary] = useState(null);
   const [monthlyTrend, setMonthlyTrend] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [expensesByCategory, setExpensesByCategory] = useState({});
   const [alerts, setAlerts] = useState([]);
+  const [salaryHistorySummary, setSalaryHistorySummary] = useState([]);
+  const [staffList, setStaffList] = useState([]);
+  
+  // Stats state with proper initialization
   const [stats, setStats] = useState({
     totalRevenue: 0,
     totalExpenses: 0,
@@ -120,7 +141,9 @@ const Accountant = () => {
     budgetUsed: 0,
     totalSalaryExpense: 0,
     paidSalaryCount: 0,
-    pendingSalaryCount: 0
+    pendingSalaryCount: 0,
+    totalPaidSalary: 0,
+    thisMonthSalary: 0
   });
 
   // Form states
@@ -153,21 +176,23 @@ const Accountant = () => {
   });
 
   const [formErrors, setFormErrors] = useState({});
+  const [formSubmitting, setFormSubmitting] = useState(false);
 
   // ==================== DATA FETCHING FUNCTIONS ====================
 
   const fetchInventoryData = useCallback(async () => {
     try {
       const result = await getInventoryWithFinancials();
-      if (result.success) {
+      if (result.success && result.data) {
         setInventoryData(result.data);
         setStats(prev => ({
           ...prev,
-          lowStockCount: result.data.summary.lowStockItems
+          lowStockCount: result.data.summary?.lowStockItems || 0
         }));
       }
     } catch (error) {
       console.error('Error fetching inventory:', error);
+      toast.error('Failed to load inventory data');
     }
   }, []);
 
@@ -175,40 +200,19 @@ const Accountant = () => {
     try {
       const status = selectedStatus !== 'all' ? selectedStatus : null;
       const result = await getPurchaseOrdersByStatus(status);
-      if (result.success) {
+      if (result.success && result.data) {
         setPurchaseOrders(result.data);
       }
     } catch (error) {
       console.error('Error fetching purchase orders:', error);
+      toast.error('Failed to load purchase orders');
     }
   }, [selectedStatus]);
-
-  const fetchPendingSalaries = useCallback(async () => {
-    try {
-      const result = await getPendingSalaryRecords();
-      if (result.success) {
-        setPendingSalaries(result.data);
-        
-        // Calculate salary statistics
-        const totalPending = result.data.length;
-        const totalAmount = result.data.reduce((sum, s) => sum + s.calculatedSalary, 0);
-        
-        setStats(prev => ({
-          ...prev,
-          pendingPayments: totalPending,
-          pendingSalaryCount: totalPending,
-          totalSalaryExpense: totalAmount
-        }));
-      }
-    } catch (error) {
-      console.error('Error fetching pending salaries:', error);
-    }
-  }, []);
 
   const fetchDepartments = useCallback(async () => {
     try {
       const result = await getDepartments();
-      if (result.success) {
+      if (result.success && result.data) {
         setDepartments(result.data);
       }
     } catch (error) {
@@ -219,38 +223,104 @@ const Accountant = () => {
   const fetchFinancialData = useCallback(async () => {
     try {
       const result = await getFinancialSummary(dateRange.start, dateRange.end);
-      if (result.success) {
+      if (result.success && result.data) {
         setFinancialSummary(result.data);
+        const revenue = result.data.revenue?.total || 0;
+        const expenses = (result.data.expenses?.total || 0) + (result.data.purchases?.total || 0);
+        const profit = result.data.profit || 0;
+        
         setStats(prev => ({
           ...prev,
-          totalRevenue: result.data.revenue.total,
-          totalExpenses: result.data.expenses.total + (result.data.purchases?.total || 0),
-          totalProfit: result.data.profit,
-          profitMargin: result.data.revenue.total > 0 
-            ? (result.data.profit / result.data.revenue.total) * 100 
-            : 0
+          totalRevenue: revenue,
+          totalExpenses: expenses,
+          totalProfit: profit,
+          profitMargin: revenue > 0 ? (profit / revenue) * 100 : 0
         }));
       }
 
       const trendResult = await getMonthlyRevenueTrend(new Date().getFullYear());
-      if (trendResult.success) {
+      if (trendResult.success && trendResult.data) {
         setMonthlyTrend(trendResult.data);
       }
 
       const expensesResult = await getExpensesByCategory(dateRange.start, dateRange.end);
-      if (expensesResult.success) {
-        setExpenses(expensesResult.data.expenses);
-        setExpensesByCategory(expensesResult.data.byCategory);
+      if (expensesResult.success && expensesResult.data) {
+        setExpenses(expensesResult.data.expenses || []);
+        setExpensesByCategory(expensesResult.data.byCategory || {});
       }
     } catch (error) {
       console.error('Error fetching financial data:', error);
     }
   }, [dateRange]);
 
+  const fetchSalaryData = useCallback(async () => {
+    try {
+      // Fetch all staff for count
+      const staffResult = await getAllStaffForAttendance();
+      if (staffResult.success) {
+        setStaffList(staffResult.data);
+      }
+      
+      // Fetch salary records for current month
+      const recordsResult = await getSalaryRecords({
+        month: selectedPeriod.month,
+        year: selectedPeriod.year
+      });
+      
+      if (recordsResult.success && recordsResult.data) {
+        const pending = recordsResult.data.filter(r => r.status === 'pending');
+        const paid = recordsResult.data.filter(r => r.status === 'paid');
+        const totalPendingAmount = pending.reduce((sum, r) => sum + (r.calculatedSalary || 0), 0);
+        const totalPaidAmount = paid.reduce((sum, r) => sum + (r.calculatedSalary || 0), 0);
+        
+        setStats(prev => ({
+          ...prev,
+          pendingSalaryCount: pending.length,
+          paidSalaryCount: paid.length,
+          totalSalaryExpense: totalPendingAmount + totalPaidAmount,
+          totalPaidSalary: totalPaidAmount,
+          thisMonthSalary: recordsResult.data.reduce((sum, r) => sum + (r.calculatedSalary || 0), 0)
+        }));
+      }
+      
+      // Fetch previous salaries summary
+      const historyResult = await getPreviousSalariesSummary();
+      if (historyResult.success && historyResult.data) {
+        const groupedByMonth = historyResult.data.reduce((acc, record) => {
+          const key = `${record.year}-${record.month}`;
+          if (!acc[key]) {
+            acc[key] = {
+              month: record.month,
+              year: record.year,
+              total: 0,
+              paid: 0,
+              pending: 0,
+              count: 0
+            };
+          }
+          acc[key].total += record.calculatedSalary || 0;
+          acc[key].count++;
+          if (record.status === 'paid') {
+            acc[key].paid += record.calculatedSalary || 0;
+          } else {
+            acc[key].pending += record.calculatedSalary || 0;
+          }
+          return acc;
+        }, {});
+        setSalaryHistorySummary(Object.values(groupedByMonth).sort((a, b) => {
+          if (a.year !== b.year) return b.year - a.year;
+          return b.month - a.month;
+        }));
+      }
+    } catch (error) {
+      console.error('Error fetching salary data:', error);
+    }
+  }, [selectedPeriod]);
+
   const fetchAlerts = useCallback(async () => {
     try {
       const result = await getPendingAlerts();
-      if (result.success) {
+      if (result.success && result.data) {
         setAlerts(result.data.filter(alert => 
           alert.type === 'LOW_STOCK' || 
           alert.type === 'BUDGET_WARNING' ||
@@ -262,53 +332,73 @@ const Accountant = () => {
     }
   }, []);
 
-  const fetchDashboardData = useCallback(async () => {
-    setLoading(true);
-    
+  const refreshAllData = useCallback(async () => {
+    setRefreshing(true);
     try {
+      const promises = [];
+      
       if (activeTab === 'dashboard') {
-        await Promise.all([
-          fetchFinancialData(),
-          fetchInventoryData(),
-          fetchPendingSalaries(),
-          fetchAlerts()
-        ]);
+        promises.push(fetchFinancialData(), fetchInventoryData(), fetchSalaryData(), fetchAlerts());
       } else if (activeTab === 'inventory') {
-        await Promise.all([
-          fetchInventoryData(),
-          fetchPurchaseOrders()
-        ]);
+        promises.push(fetchInventoryData(), fetchPurchaseOrders());
       } else if (activeTab === 'purchases') {
-        await fetchPurchaseOrders();
+        promises.push(fetchPurchaseOrders());
       } else if (activeTab === 'expenses') {
-        await Promise.all([
-          fetchFinancialData(),
-          fetchDepartments()
-        ]);
+        promises.push(fetchFinancialData(), fetchDepartments());
       } else if (activeTab === 'budget') {
-        await Promise.all([
-          fetchDepartments(),
-          fetchFinancialData()
-        ]);
+        promises.push(fetchDepartments(), fetchFinancialData());
       } else if (activeTab === 'salaries') {
-        await Promise.all([
-          fetchPendingSalaries(),
-          fetchFinancialData()
-        ]);
+        promises.push(fetchSalaryData(), fetchDepartments());
       }
+      
+      await Promise.all(promises);
+      toast.success('Data refreshed successfully');
     } catch (error) {
-      console.error('Error fetching data:', error);
-      toast.error('Failed to load data');
+      console.error('Error refreshing data:', error);
+      toast.error('Failed to refresh some data');
     } finally {
-      setLoading(false);
+      setRefreshing(false);
     }
-  }, [activeTab, fetchFinancialData, fetchInventoryData, fetchPendingSalaries, fetchAlerts, fetchPurchaseOrders, fetchDepartments]);
+  }, [activeTab, fetchFinancialData, fetchInventoryData, fetchSalaryData, fetchAlerts, fetchPurchaseOrders, fetchDepartments]);
 
   // ==================== EFFECTS ====================
 
   useEffect(() => {
-    fetchDashboardData();
-  }, [fetchDashboardData, activeTab]);
+    const loadInitialData = async () => {
+      setLoading(true);
+      try {
+        await Promise.all([
+          fetchDepartments(),
+          fetchInventoryData()
+        ]);
+        
+        if (activeTab === 'dashboard') {
+          await Promise.all([
+            fetchFinancialData(),
+            fetchSalaryData(),
+            fetchAlerts()
+          ]);
+        } else if (activeTab === 'inventory') {
+          await fetchPurchaseOrders();
+        } else if (activeTab === 'purchases') {
+          await fetchPurchaseOrders();
+        } else if (activeTab === 'expenses') {
+          await fetchFinancialData();
+        } else if (activeTab === 'budget') {
+          await fetchFinancialData();
+        } else if (activeTab === 'salaries') {
+          await fetchSalaryData();
+        }
+      } catch (error) {
+        console.error('Error loading initial data:', error);
+        toast.error('Failed to load dashboard data');
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    loadInitialData();
+  }, [activeTab, fetchFinancialData, fetchInventoryData, fetchSalaryData, fetchAlerts, fetchPurchaseOrders, fetchDepartments]);
 
   // ==================== VALIDATION FUNCTIONS ====================
 
@@ -379,7 +469,7 @@ const Accountant = () => {
       return;
     }
 
-    setLoading(true);
+    setFormSubmitting(true);
     
     try {
       const result = await addExpense({
@@ -391,7 +481,7 @@ const Accountant = () => {
         toast.success('Expense added successfully');
         setShowExpenseModal(false);
         resetExpenseForm();
-        fetchFinancialData();
+        await fetchFinancialData();
       } else {
         toast.error(result.error || 'Failed to add expense');
       }
@@ -399,7 +489,7 @@ const Accountant = () => {
       console.error('Error adding expense:', error);
       toast.error('Failed to add expense');
     } finally {
-      setLoading(false);
+      setFormSubmitting(false);
     }
   };
 
@@ -411,7 +501,7 @@ const Accountant = () => {
       return;
     }
 
-    setLoading(true);
+    setFormSubmitting(true);
     
     try {
       const result = await createPurchaseOrder({
@@ -424,7 +514,7 @@ const Accountant = () => {
         toast.success('Purchase order created successfully');
         setShowPurchaseModal(false);
         resetPurchaseForm();
-        fetchPurchaseOrders();
+        await fetchPurchaseOrders();
       } else {
         toast.error(result.error || 'Failed to create purchase order');
       }
@@ -432,19 +522,19 @@ const Accountant = () => {
       console.error('Error creating purchase order:', error);
       toast.error('Failed to create purchase order');
     } finally {
-      setLoading(false);
+      setFormSubmitting(false);
     }
   };
 
   const handleApprovePurchaseOrder = async (poId) => {
-    setLoading(true);
+    setFormSubmitting(true);
     
     try {
       const result = await updatePurchaseOrderStatus(poId, 'approved', currentUser.uid);
       
       if (result.success) {
         toast.success('Purchase order approved');
-        fetchPurchaseOrders();
+        await fetchPurchaseOrders();
       } else {
         toast.error(result.error || 'Failed to approve purchase order');
       }
@@ -452,20 +542,19 @@ const Accountant = () => {
       console.error('Error approving purchase order:', error);
       toast.error('Failed to approve purchase order');
     } finally {
-      setLoading(false);
+      setFormSubmitting(false);
     }
   };
 
   const handleConfirmDelivery = async (poId) => {
-    setLoading(true);
+    setFormSubmitting(true);
     
     try {
       const result = await updatePurchaseOrderStatus(poId, 'delivered', currentUser.uid);
       
       if (result.success) {
         toast.success('Delivery confirmed - Inventory updated');
-        fetchPurchaseOrders();
-        fetchInventoryData();
+        await Promise.all([fetchPurchaseOrders(), fetchInventoryData()]);
       } else {
         toast.error(result.error || 'Failed to confirm delivery');
       }
@@ -473,7 +562,7 @@ const Accountant = () => {
       console.error('Error confirming delivery:', error);
       toast.error('Failed to confirm delivery');
     } finally {
-      setLoading(false);
+      setFormSubmitting(false);
     }
   };
 
@@ -485,7 +574,7 @@ const Accountant = () => {
       return;
     }
 
-    setLoading(true);
+    setFormSubmitting(true);
     
     try {
       const result = await setDepartmentBudget(
@@ -502,6 +591,7 @@ const Accountant = () => {
         toast.success('Budget set successfully');
         setShowBudgetModal(false);
         resetBudgetForm();
+        await fetchDepartments();
       } else {
         toast.error(result.error || 'Failed to set budget');
       }
@@ -509,7 +599,7 @@ const Accountant = () => {
       console.error('Error setting budget:', error);
       toast.error('Failed to set budget');
     } finally {
-      setLoading(false);
+      setFormSubmitting(false);
     }
   };
 
@@ -519,7 +609,7 @@ const Accountant = () => {
     try {
       const result = await generateInventoryReport(dateRange.start, dateRange.end);
       
-      if (result.success) {
+      if (result.success && result.data) {
         const blob = new Blob([JSON.stringify(result.data, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -542,10 +632,11 @@ const Accountant = () => {
   };
 
   const handleExportData = async (type) => {
+    setLoading(true);
     try {
       const result = await exportCollection(type);
       
-      if (result.success) {
+      if (result.success && result.data) {
         const jsonString = atob(result.data);
         const data = JSON.parse(jsonString);
         
@@ -564,12 +655,14 @@ const Accountant = () => {
     } catch (error) {
       console.error('Error exporting data:', error);
       toast.error('Failed to export data');
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleSalaryProcessed = (record) => {
-    toast.success(`Salary payment processed for ${record.userName}`);
-    fetchPendingSalaries();
+  const handleSalaryProcessed = () => {
+    toast.success('Salary processed successfully');
+    fetchSalaryData();
     fetchFinancialData();
   };
 
@@ -622,7 +715,7 @@ const Accountant = () => {
 
   // ==================== RENDER FUNCTIONS ====================
 
-  const tabs = [
+  const tabs = useMemo(() => [
     { id: 'dashboard', label: 'Dashboard', icon: faChartLine },
     { id: 'salaries', label: 'Salary Management', icon: faMoneyCheck },
     { id: 'inventory', label: 'Inventory', icon: faBoxes },
@@ -630,111 +723,131 @@ const Accountant = () => {
     { id: 'expenses', label: 'Expenses', icon: faMoneyBillWave },
     { id: 'budget', label: 'Budget', icon: faWallet },
     { id: 'reports', label: 'Reports', icon: faFileExport }
-  ];
+  ], []);
 
   const renderDashboard = () => (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fadeIn">
       {/* Alert Banner */}
       {alerts.length > 0 && (
-        <div className="bg-yellow-50 dark:bg-yellow-900 border-l-4 border-yellow-600 p-4">
-          <div className="flex items-center">
-            <FontAwesomeIcon icon={faExclamationTriangle} className="h-5 w-5 text-yellow-600 dark:text-yellow-400 mr-3" />
-            <div>
+        <div className="bg-yellow-50 dark:bg-yellow-900/30 border-l-4 border-yellow-500 rounded-lg p-4">
+          <div className="flex items-start">
+            <FontAwesomeIcon icon={faBell} className="h-5 w-5 text-yellow-600 dark:text-yellow-400 mr-3 mt-0.5" />
+            <div className="flex-1">
               <p className="text-yellow-800 dark:text-yellow-200 font-medium">
                 {alerts.length} Financial Alert{alerts.length > 1 ? 's' : ''}
               </p>
-              <ul className="text-sm text-yellow-700 dark:text-yellow-300 list-disc list-inside">
-                {alerts.map((alert, idx) => (
+              <ul className="text-sm text-yellow-700 dark:text-yellow-300 list-disc list-inside mt-1">
+                {alerts.slice(0, 3).map((alert, idx) => (
                   <li key={idx}>{alert.message}</li>
                 ))}
+                {alerts.length > 3 && (
+                  <li>And {alerts.length - 3} more alerts...</li>
+                )}
               </ul>
             </div>
+            <button
+              onClick={() => setAlerts([])}
+              className="text-yellow-600 hover:text-yellow-700"
+            >
+              <FontAwesomeIcon icon={faTimes} />
+            </button>
           </div>
         </div>
       )}
 
-      {/* Date Range Picker */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-          <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Period:</label>
-          <div className="flex flex-col sm:flex-row gap-2">
-            <DatePicker
-              selectsRange={true}
-              startDate={dateRange.start}
-              endDate={dateRange.end}
-              onChange={(update) => {
-                setDateRange({
-                  start: update[0],
-                  end: update[1]
-                });
-              }}
-              className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-            />
+      {/* Date Range Picker & Refresh */}
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-4">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Period:</label>
+            <div className="flex gap-2">
+              <DatePicker
+                selected={dateRange.start}
+                onChange={(date) => setDateRange(prev => ({ ...prev, start: date }))}
+                className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white text-sm"
+                placeholderText="Start Date"
+              />
+              <span className="text-gray-500">to</span>
+              <DatePicker
+                selected={dateRange.end}
+                onChange={(date) => setDateRange(prev => ({ ...prev, end: date }))}
+                className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white text-sm"
+                placeholderText="End Date"
+              />
+            </div>
             <button
               onClick={fetchFinancialData}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm"
             >
               Apply
             </button>
           </div>
+          <button
+            onClick={refreshAllData}
+            disabled={refreshing}
+            className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition disabled:opacity-50 flex items-center text-sm"
+          >
+            <FontAwesomeIcon icon={faSync} className={`mr-2 ${refreshing ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
         </div>
       </div>
 
       {/* Key Financial Metrics */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-lg shadow-lg p-6 text-white">
+        <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-xl shadow-lg p-5 text-white transform hover:scale-105 transition duration-300">
           <div className="flex justify-between items-start">
             <div>
-              <p className="text-green-100 text-sm">Total Revenue</p>
-              <p className="text-2xl font-bold">{formatCurrency(stats.totalRevenue)}</p>
+              <p className="text-green-100 text-sm font-medium">Total Revenue</p>
+              <p className="text-2xl font-bold mt-1">{formatCurrency(stats.totalRevenue)}</p>
             </div>
-            <div className="bg-white bg-opacity-30 rounded-full p-3">
+            <div className="bg-white/20 rounded-full p-3">
               <FontAwesomeIcon icon={faDollarSign} className="h-6 w-6" />
             </div>
           </div>
         </div>
 
-        <div className="bg-gradient-to-br from-red-500 to-red-600 rounded-lg shadow-lg p-6 text-white">
+        <div className="bg-gradient-to-br from-red-500 to-red-600 rounded-xl shadow-lg p-5 text-white transform hover:scale-105 transition duration-300">
           <div className="flex justify-between items-start">
             <div>
-              <p className="text-red-100 text-sm">Total Expenses</p>
-              <p className="text-2xl font-bold">{formatCurrency(stats.totalExpenses)}</p>
+              <p className="text-red-100 text-sm font-medium">Total Expenses</p>
+              <p className="text-2xl font-bold mt-1">{formatCurrency(stats.totalExpenses)}</p>
             </div>
-            <div className="bg-white bg-opacity-30 rounded-full p-3">
+            <div className="bg-white/20 rounded-full p-3">
               <FontAwesomeIcon icon={faMoneyBillWave} className="h-6 w-6" />
             </div>
           </div>
         </div>
 
-        <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg shadow-lg p-6 text-white">
+        <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl shadow-lg p-5 text-white transform hover:scale-105 transition duration-300">
           <div className="flex justify-between items-start">
             <div>
-              <p className="text-blue-100 text-sm">Net Profit</p>
-              <p className={`text-2xl font-bold ${stats.totalProfit >= 0 ? 'text-white' : 'text-red-200'}`}>
+              <p className="text-blue-100 text-sm font-medium">Net Profit</p>
+              <p className={`text-2xl font-bold mt-1 ${stats.totalProfit >= 0 ? 'text-white' : 'text-red-200'}`}>
                 {formatCurrency(Math.abs(stats.totalProfit))}
               </p>
             </div>
-            <div className="bg-white bg-opacity-30 rounded-full p-3">
+            <div className="bg-white/20 rounded-full p-3">
               <FontAwesomeIcon icon={faBalanceScale} className="h-6 w-6" />
             </div>
           </div>
-          <div className="mt-4 text-blue-100 text-sm">
+          <div className="mt-2 text-blue-100 text-sm">
             Margin: {stats.profitMargin.toFixed(1)}%
           </div>
         </div>
 
-        <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-lg shadow-lg p-6 text-white">
+        <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-xl shadow-lg p-5 text-white transform hover:scale-105 transition duration-300">
           <div className="flex justify-between items-start">
             <div>
-              <p className="text-purple-100 text-sm">Salary Pending</p>
-              <p className="text-2xl font-bold">{stats.pendingSalaryCount}</p>
+              <p className="text-purple-100 text-sm font-medium">This Month Salary</p>
+              <p className="text-2xl font-bold mt-1">{formatCurrency(stats.thisMonthSalary)}</p>
             </div>
-            <div className="bg-white bg-opacity-30 rounded-full p-3">
+            <div className="bg-white/20 rounded-full p-3">
               <FontAwesomeIcon icon={faMoneyCheck} className="h-6 w-6" />
             </div>
           </div>
-          <div className="mt-4 text-purple-100 text-sm">
-            Amount: {formatCurrency(stats.totalSalaryExpense)}
+          <div className="mt-2 text-purple-100 text-sm">
+            {stats.pendingSalaryCount} pending / {stats.paidSalaryCount} paid
           </div>
         </div>
       </div>
@@ -742,57 +855,70 @@ const Accountant = () => {
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Revenue Trend */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Monthly Revenue Trend</h3>
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center">
+            <FontAwesomeIcon icon={faChartLine} className="mr-2 text-blue-500" />
+            Monthly Revenue Trend
+          </h3>
           <div className="h-64">
-            <Line
-              data={{
-                labels: monthlyTrend.map(m => m.monthName),
-                datasets: [{
-                  label: 'Revenue',
-                  data: monthlyTrend.map(m => m.revenue),
-                  borderColor: 'rgb(34, 197, 94)',
-                  backgroundColor: 'rgba(34, 197, 94, 0.1)',
-                  tension: 0.4,
-                  fill: true
-                }]
-              }}
-              options={{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                  legend: { display: false },
-                  tooltip: {
-                    callbacks: {
-                      label: (ctx) => formatCurrency(ctx.raw)
+            {monthlyTrend.length > 0 ? (
+              <Line
+                data={{
+                  labels: monthlyTrend.map(m => m.monthName?.slice(0, 3) || ''),
+                  datasets: [{
+                    label: 'Revenue',
+                    data: monthlyTrend.map(m => m.revenue || 0),
+                    borderColor: 'rgb(34, 197, 94)',
+                    backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                    tension: 0.4,
+                    fill: true
+                  }]
+                }}
+                options={{
+                  responsive: true,
+                  maintainAspectRatio: false,
+                  plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                      callbacks: {
+                        label: (ctx) => formatCurrency(ctx.raw)
+                      }
+                    }
+                  },
+                  scales: {
+                    y: {
+                      beginAtZero: true,
+                      ticks: {
+                        callback: (value) => formatCurrency(value)
+                      }
                     }
                   }
-                },
-                scales: {
-                  y: {
-                    beginAtZero: true,
-                    ticks: {
-                      callback: (value) => formatCurrency(value)
-                    }
-                  }
-                }
-              }}
-            />
+                }}
+              />
+            ) : (
+              <div className="flex items-center justify-center h-full text-gray-500">
+                No revenue data available
+              </div>
+            )}
           </div>
         </div>
 
         {/* Expenses by Category */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Expenses by Category</h3>
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center">
+            <FontAwesomeIcon icon={faMoneyBillWave} className="mr-2 text-red-500" />
+            Expenses by Category
+          </h3>
           <div className="h-64">
             {Object.keys(expensesByCategory).length > 0 ? (
               <Pie
                 data={{
-                  labels: Object.keys(expensesByCategory),
+                  labels: Object.keys(expensesByCategory).map(k => k.replace('_', ' ').toUpperCase()),
                   datasets: [{
                     data: Object.values(expensesByCategory),
                     backgroundColor: [
-                      '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF', '#FF9F40'
+                      '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF', '#FF9F40',
+                      '#CDDC39', '#9C27B0', '#FF9800', '#795548', '#607D8B', '#E91E63'
                     ]
                   }]
                 }}
@@ -814,7 +940,7 @@ const Accountant = () => {
                           const label = ctx.label || '';
                           const value = ctx.raw || 0;
                           const total = ctx.dataset.data.reduce((a, b) => a + b, 0);
-                          const percentage = ((value / total) * 100).toFixed(1);
+                          const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
                           return `${label}: ${formatCurrency(value)} (${percentage}%)`;
                         }
                       }
@@ -823,7 +949,9 @@ const Accountant = () => {
                 }}
               />
             ) : (
-              <p className="text-center text-gray-500 dark:text-gray-400 py-8">No expense data available</p>
+              <div className="flex items-center justify-center h-full text-gray-500">
+                No expense data available
+              </div>
             )}
           </div>
         </div>
@@ -832,62 +960,64 @@ const Accountant = () => {
       {/* Recent Activity */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Recent Expenses */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
-          <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg">
+          <div className="px-5 py-4 border-b border-gray-200 dark:border-gray-700">
             <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Recent Expenses</h3>
           </div>
-          <div className="p-6">
+          <div className="p-5">
             {expenses.slice(0, 5).map((expense) => (
               <div key={expense.id} className="flex justify-between items-center py-3 border-b border-gray-100 dark:border-gray-700 last:border-0">
                 <div>
                   <p className="font-medium text-gray-900 dark:text-white">{expense.description}</p>
                   <p className="text-sm text-gray-500 dark:text-gray-400">
-                    {expense.category} • {formatDate(expense.createdAt)}
+                    {expense.category?.replace('_', ' ')} • {formatDate(expense.createdAt)}
                   </p>
                 </div>
                 <p className="font-medium text-red-600">{formatCurrency(expense.amount)}</p>
               </div>
             ))}
             {expenses.length === 0 && (
-              <p className="text-center text-gray-500 dark:text-gray-400 py-4">No expenses recorded</p>
+              <p className="text-center text-gray-500 dark:text-gray-400 py-6">No expenses recorded</p>
             )}
           </div>
         </div>
 
-        {/* Pending Salaries */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
-          <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Pending Salaries</h3>
+        {/* Quick Stats */}
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg">
+          <div className="px-5 py-4 border-b border-gray-200 dark:border-gray-700">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Quick Statistics</h3>
           </div>
-          <div className="p-6">
-            {pendingSalaries.slice(0, 5).map((salary) => (
-              <div key={salary.id} className="flex justify-between items-center py-3 border-b border-gray-100 dark:border-gray-700 last:border-0">
-                <div>
-                  <p className="font-medium text-gray-900 dark:text-white">{salary.userName}</p>
-                  <p className="text-sm text-gray-500 dark:text-gray-400">
-                    {salary.userRole} • {salary.month}/{salary.year}
-                  </p>
-                </div>
-                <p className="font-medium text-green-600">{formatCurrency(salary.calculatedSalary)}</p>
-              </div>
-            ))}
-            {pendingSalaries.length === 0 && (
-              <p className="text-center text-gray-500 dark:text-gray-400 py-4">No pending salaries</p>
-            )}
+          <div className="p-5 grid grid-cols-2 gap-4">
+            <div className="bg-blue-50 dark:bg-blue-900/30 rounded-lg p-3 text-center">
+              <p className="text-blue-600 dark:text-blue-400 text-sm">Total Staff</p>
+              <p className="text-2xl font-bold text-blue-700 dark:text-blue-300">{staffList.length}</p>
+            </div>
+            <div className="bg-green-50 dark:bg-green-900/30 rounded-lg p-3 text-center">
+              <p className="text-green-600 dark:text-green-400 text-sm">Departments</p>
+              <p className="text-2xl font-bold text-green-700 dark:text-green-300">{departments.length}</p>
+            </div>
+            <div className="bg-yellow-50 dark:bg-yellow-900/30 rounded-lg p-3 text-center">
+              <p className="text-yellow-600 dark:text-yellow-400 text-sm">Low Stock Items</p>
+              <p className="text-2xl font-bold text-yellow-700 dark:text-yellow-300">{stats.lowStockCount}</p>
+            </div>
+            <div className="bg-purple-50 dark:bg-purple-900/30 rounded-lg p-3 text-center">
+              <p className="text-purple-600 dark:text-purple-400 text-sm">Pending Payments</p>
+              <p className="text-2xl font-bold text-purple-700 dark:text-purple-300">{stats.pendingSalaryCount}</p>
+            </div>
           </div>
         </div>
       </div>
 
       {/* Low Stock Alerts */}
       {inventoryData.summary.lowStockItems > 0 && (
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
-          <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 bg-red-50 dark:bg-red-900">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg">
+          <div className="px-5 py-4 border-b border-gray-200 dark:border-gray-700 bg-red-50 dark:bg-red-900/30 rounded-t-xl">
             <h3 className="text-lg font-semibold text-red-800 dark:text-red-200 flex items-center">
               <FontAwesomeIcon icon={faExclamationTriangle} className="mr-2" />
               Low Stock Alert ({inventoryData.summary.lowStockItems} items)
             </h3>
           </div>
-          <div className="p-6">
+          <div className="p-5">
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {inventoryData.items
                 .filter(item => item.quantity <= item.threshold)
@@ -902,14 +1032,13 @@ const Accountant = () => {
                       onClick={() => {
                         setPurchaseForm({
                           ...purchaseForm,
-                          itemId: item.id,
-                          itemName: item.name
+                          itemId: item.id
                         });
                         setShowPurchaseModal(true);
                       }}
-                      className="mt-2 text-sm text-blue-600 hover:text-blue-700"
+                      className="mt-2 text-sm text-blue-600 hover:text-blue-700 font-medium"
                     >
-                      Create Purchase Order
+                      Create Purchase Order →
                     </button>
                   </div>
                 ))}
@@ -921,134 +1050,226 @@ const Accountant = () => {
   );
 
   const renderSalaryManagement = () => (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fadeIn">
       {/* Salary Summary Stats */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-          <p className="text-sm text-gray-600 dark:text-gray-400">Pending Payments</p>
-          <p className="text-2xl font-bold text-yellow-600">{stats.pendingSalaryCount}</p>
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600 dark:text-gray-400">Total Staff</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-white">{staffList.length}</p>
+            </div>
+            <FontAwesomeIcon icon={faUsers} className="h-8 w-8 text-blue-400" />
+          </div>
         </div>
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-          <p className="text-sm text-gray-600 dark:text-gray-400">Total Pending Amount</p>
-          <p className="text-2xl font-bold text-blue-600">{formatCurrency(stats.totalSalaryExpense)}</p>
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600 dark:text-gray-400">This Month Salary</p>
+              <p className="text-2xl font-bold text-green-600">{formatCurrency(stats.thisMonthSalary)}</p>
+            </div>
+            <FontAwesomeIcon icon={faMoneyCheck} className="h-8 w-8 text-green-400" />
+          </div>
         </div>
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-          <p className="text-sm text-gray-600 dark:text-gray-400">This Month</p>
-          <p className="text-2xl font-bold text-green-600">
-            {pendingSalaries.filter(s => s.month === new Date().getMonth() + 1).length}
-          </p>
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600 dark:text-gray-400">Pending Amount</p>
+              <p className="text-2xl font-bold text-yellow-600">{formatCurrency(stats.totalSalaryExpense - stats.totalPaidSalary)}</p>
+            </div>
+            <FontAwesomeIcon icon={faClock} className="h-8 w-8 text-yellow-400" />
+          </div>
+          <p className="text-xs text-gray-500 mt-1">{stats.pendingSalaryCount} staff pending</p>
         </div>
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-          <p className="text-sm text-gray-600 dark:text-gray-400">Total Salary Expense</p>
-          <p className="text-2xl font-bold text-purple-600">{formatCurrency(stats.totalExpenses)}</p>
-        </div>
-      </div>
-
-      {/* Sub-tabs for salary management */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
-        <div className="border-b border-gray-200 dark:border-gray-700">
-          <nav className="flex space-x-4 overflow-x-auto px-4">
-            <button
-              onClick={() => setSalaryTab('pending')}
-              className={`py-4 px-2 text-sm font-medium border-b-2 transition ${
-                salaryTab === 'pending'
-                  ? 'border-blue-600 text-blue-600 dark:text-blue-400'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
-              }`}
-            >
-              Pending Payments
-            </button>
-            <button
-              onClick={() => setSalaryTab('calculated')}
-              className={`py-4 px-2 text-sm font-medium border-b-2 transition ${
-                salaryTab === 'calculated'
-                  ? 'border-blue-600 text-blue-600 dark:text-blue-400'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
-              }`}
-            >
-              Salary Calculation
-            </button>
-            <button
-              onClick={() => setSalaryTab('attendance')}
-              className={`py-4 px-2 text-sm font-medium border-b-2 transition ${
-                salaryTab === 'attendance'
-                  ? 'border-blue-600 text-blue-600 dark:text-blue-400'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300'
-              }`}
-            >
-              Attendance Overview
-            </button>
-          </nav>
-        </div>
-
-        {/* Render appropriate module */}
-        <div className="p-4">
-          {salaryTab === 'pending' && (
-            <SalaryPaymentModule
-              onPaymentProcessed={handleSalaryProcessed}
-            />
-          )}
-          {salaryTab === 'calculated' && (
-            <SalaryCalculationModule
-              onCalculated={(records) => {
-                toast.success(`Salaries calculated for ${records.length} staff members`);
-                fetchPendingSalaries();
-              }}
-            />
-          )}
-          {salaryTab === 'attendance' && (
-            <AttendanceModule
-              onAttendanceMarked={(record) => {
-                toast.success(`Attendance marked for ${record.fullName}`);
-              }}
-            />
-          )}
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600 dark:text-gray-400">Total Paid</p>
+              <p className="text-2xl font-bold text-purple-600">{formatCurrency(stats.totalPaidSalary)}</p>
+            </div>
+            <FontAwesomeIcon icon={faCheckCircle} className="h-8 w-8 text-purple-400" />
+          </div>
+          <p className="text-xs text-gray-500 mt-1">{stats.paidSalaryCount} staff paid</p>
         </div>
       </div>
 
-      {/* Quick Actions */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Quick Actions</h3>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <button
-            onClick={() => {
-              handleExportData('salary');
-            }}
-            className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-green-500 transition group"
-          >
-            <FontAwesomeIcon icon={faFileExport} className="h-8 w-8 text-gray-400 group-hover:text-green-500 mb-2" />
-            <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Export Salary Report</p>
-          </button>
+      {/* Period Selector */}
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-4">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+          <div className="flex items-center gap-3">
+            <label className="text-sm font-medium text-gray-700 dark:text-gray-300">Salary Period:</label>
+            <div className="flex gap-2 items-center">
+              <button
+                onClick={() => {
+                  const newMonth = selectedPeriod.month === 1 ? 12 : selectedPeriod.month - 1;
+                  const newYear = selectedPeriod.month === 1 ? selectedPeriod.year - 1 : selectedPeriod.year;
+                  setSelectedPeriod({ month: newMonth, year: newYear });
+                  fetchSalaryData();
+                }}
+                className="p-2 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 transition"
+              >
+                <FontAwesomeIcon icon={faArrowLeft} />
+              </button>
+              <span className="text-lg font-semibold text-gray-900 dark:text-white min-w-[150px] text-center">
+                {new Date(selectedPeriod.year, selectedPeriod.month - 1).toLocaleString('default', { month: 'long' })} {selectedPeriod.year}
+              </span>
+              <button
+                onClick={() => {
+                  const newMonth = selectedPeriod.month === 12 ? 1 : selectedPeriod.month + 1;
+                  const newYear = selectedPeriod.month === 12 ? selectedPeriod.year + 1 : selectedPeriod.year;
+                  setSelectedPeriod({ month: newMonth, year: newYear });
+                  fetchSalaryData();
+                }}
+                className="p-2 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 transition"
+              >
+                <FontAwesomeIcon icon={faArrowRight} />
+              </button>
+              <button
+                onClick={() => {
+                  setSelectedPeriod({
+                    month: new Date().getMonth() + 1,
+                    year: new Date().getFullYear()
+                  });
+                  fetchSalaryData();
+                }}
+                className="px-3 py-2 text-sm bg-blue-100 dark:bg-blue-900 text-blue-600 dark:text-blue-300 rounded-lg hover:bg-blue-200 transition"
+              >
+                Current Month
+              </button>
+            </div>
+          </div>
           
-          <button
-            onClick={() => {
-              setSalaryTab('calculated');
-            }}
-            className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-blue-500 transition group"
-          >
-            <FontAwesomeIcon icon={faCalculator} className="h-8 w-8 text-gray-400 group-hover:text-blue-500 mb-2" />
-            <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Calculate Monthly Salaries</p>
-          </button>
-          
-          <button
-            onClick={() => {
-              toast.info('Generating salary slips...');
-              setTimeout(() => {
-                toast.success('Salary slips generated');
-              }, 2000);
-            }}
-            className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-purple-500 transition group"
-          >
-            <FontAwesomeIcon icon={faDownload} className="h-8 w-8 text-gray-400 group-hover:text-purple-500 mb-2" />
-            <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Generate All Salary Slips</p>
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setSalaryView('calculation')}
+              className={`px-4 py-2 rounded-lg transition flex items-center ${
+                salaryView === 'calculation'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300 hover:bg-gray-200'
+              }`}
+            >
+              <FontAwesomeIcon icon={faCalculator} className="mr-2" />
+              Calculate Salaries
+            </button>
+            <button
+              onClick={() => setSalaryView('history')}
+              className={`px-4 py-2 rounded-lg transition flex items-center ${
+                salaryView === 'history'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300 hover:bg-gray-200'
+              }`}
+            >
+              <FontAwesomeIcon icon={faHistory} className="mr-2" />
+              History & Receipts
+            </button>
+          </div>
         </div>
       </div>
+
+      {/* Render appropriate view */}
+      {salaryView === 'calculation' ? (
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg overflow-hidden">
+          <SalaryCalculationModule onSalaryProcessed={handleSalaryProcessed} />
+        </div>
+      ) : (
+        <div className="space-y-6">
+          {/* Previous Salaries Summary */}
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center">
+              <FontAwesomeIcon icon={faHistory} className="mr-2 text-purple-500" />
+              Previous Months Salary Summary
+            </h3>
+            
+            <div className="overflow-x-auto">
+              <table className="min-w-full">
+                <thead>
+                  <tr className="border-b border-gray-200 dark:border-gray-700">
+                    <th className="px-4 py-3 text-left text-xs font-medium text-gray-500">Period</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">Staff Count</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">Total Salary</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">Paid</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-gray-500">Pending</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-gray-500">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {salaryHistorySummary.map((summary, idx) => (
+                    <tr key={idx} className="border-b border-gray-100 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700">
+                      <td className="px-4 py-3 font-medium">
+                        {new Date(summary.year, summary.month - 1).toLocaleString('default', { month: 'long' })} {summary.year}
+                      </td>
+                      <td className="px-4 py-3 text-right">{summary.count}</td>
+                      <td className="px-4 py-3 text-right font-medium">{formatCurrency(summary.total)}</td>
+                      <td className="px-4 py-3 text-right text-green-600">{formatCurrency(summary.paid)}</td>
+                      <td className="px-4 py-3 text-right text-yellow-600">{formatCurrency(summary.pending)}</td>
+                      <td className="px-4 py-3 text-center">
+                        <button
+                          onClick={() => {
+                            setSelectedSalaryHistory(summary);
+                            setShowSalaryHistoryModal(true);
+                          }}
+                          className="text-blue-600 hover:text-blue-700 transition"
+                          title="View Details"
+                        >
+                          <FontAwesomeIcon icon={faEye} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                  {salaryHistorySummary.length === 0 && (
+                    <tr>
+                      <td colSpan="6" className="px-4 py-8 text-center text-gray-500">
+                        No salary history available
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Quick Actions */}
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Quick Actions</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <button
+                onClick={() => handleExportData('salary')}
+                className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl hover:border-green-500 transition group text-center"
+              >
+                <FontAwesomeIcon icon={faFileExport} className="h-8 w-8 text-gray-400 group-hover:text-green-500 mb-2" />
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Export Salary Report</p>
+              </button>
+              
+              <button
+                onClick={() => {
+                  setSelectedPeriod({
+                    month: new Date().getMonth() + 1,
+                    year: new Date().getFullYear()
+                  });
+                  setSalaryView('calculation');
+                }}
+                className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl hover:border-blue-500 transition group text-center"
+              >
+                <FontAwesomeIcon icon={faCalculator} className="h-8 w-8 text-gray-400 group-hover:text-blue-500 mb-2" />
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Calculate Monthly Salaries</p>
+              </button>
+              
+              <button
+                onClick={() => handleExportData('attendance')}
+                className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-xl hover:border-purple-500 transition group text-center"
+              >
+                <FontAwesomeIcon icon={faDownload} className="h-8 w-8 text-gray-400 group-hover:text-purple-500 mb-2" />
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Export Attendance Report</p>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 
   const renderInventory = () => (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fadeIn">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Inventory Management</h2>
         <div className="flex gap-2">
@@ -1060,10 +1281,11 @@ const Accountant = () => {
             New Purchase Order
           </button>
           <button
-            onClick={fetchInventoryData}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition flex items-center"
+            onClick={refreshAllData}
+            disabled={refreshing}
+            className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition disabled:opacity-50 flex items-center"
           >
-            <FontAwesomeIcon icon={faSync} className="mr-2" />
+            <FontAwesomeIcon icon={faSync} className={`mr-2 ${refreshing ? 'animate-spin' : ''}`} />
             Refresh
           </button>
         </div>
@@ -1071,43 +1293,43 @@ const Accountant = () => {
 
       {/* Inventory Summary */}
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
           <p className="text-sm text-gray-600 dark:text-gray-400">Total Items</p>
           <p className="text-2xl font-bold text-gray-900 dark:text-white">{inventoryData.summary.totalItems}</p>
         </div>
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
           <p className="text-sm text-gray-600 dark:text-gray-400">Total Value</p>
           <p className="text-2xl font-bold text-green-600">{formatCurrency(inventoryData.summary.totalValue)}</p>
         </div>
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
           <p className="text-sm text-gray-600 dark:text-gray-400">Total Cost</p>
           <p className="text-2xl font-bold text-blue-600">{formatCurrency(inventoryData.summary.totalCost)}</p>
         </div>
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
           <p className="text-sm text-gray-600 dark:text-gray-400">Low Stock</p>
           <p className="text-2xl font-bold text-yellow-600">{inventoryData.summary.lowStockItems}</p>
         </div>
       </div>
 
       {/* Inventory Table */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg overflow-hidden">
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
             <thead className="bg-gray-50 dark:bg-gray-900">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Item</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Category</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Quantity</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Price</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Value</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Status</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Actions</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Quantity</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Price</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Value</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
               </tr>
             </thead>
-            <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+            <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
               {inventoryData.items.map((item) => {
                 const isLowStock = item.quantity <= item.threshold;
-                const value = item.price * item.quantity;
+                const value = (item.price || 0) * (item.quantity || 0);
 
                 return (
                   <tr key={item.id} className={isLowStock ? 'bg-red-50 dark:bg-red-900/20' : ''}>
@@ -1117,7 +1339,7 @@ const Accountant = () => {
                         <div className="text-xs text-gray-500">Supplier: {item.supplier}</div>
                       )}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">{item.category}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">{item.category || 'General'}</td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className={`text-sm font-medium ${isLowStock ? 'text-red-600' : 'text-gray-900 dark:text-white'}`}>
                         {item.quantity} {item.unit}
@@ -1148,16 +1370,17 @@ const Accountant = () => {
                       >
                         <FontAwesomeIcon icon={faShoppingCart} />
                       </button>
-                      <button
-                        className="text-blue-600 hover:text-blue-700"
-                        title="View Details"
-                      >
-                        <FontAwesomeIcon icon={faEye} />
-                      </button>
                     </td>
                   </tr>
                 );
               })}
+              {inventoryData.items.length === 0 && (
+                <tr>
+                  <td colSpan="7" className="px-6 py-8 text-center text-gray-500">
+                    No inventory items found
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -1166,7 +1389,7 @@ const Accountant = () => {
   );
 
   const renderPurchaseOrders = () => (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fadeIn">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Purchase Orders</h2>
         <div className="flex gap-2">
@@ -1188,31 +1411,39 @@ const Accountant = () => {
             <option value="delivered">Delivered</option>
             <option value="cancelled">Cancelled</option>
           </select>
+          <button
+            onClick={refreshAllData}
+            disabled={refreshing}
+            className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition disabled:opacity-50 flex items-center"
+          >
+            <FontAwesomeIcon icon={faSync} className={`mr-2 ${refreshing ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
         </div>
       </div>
 
       {/* Purchase Orders Table */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg overflow-hidden">
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
             <thead className="bg-gray-50 dark:bg-gray-900">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">PO #</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Item</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Supplier</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Quantity</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Price</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Total</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Status</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Date</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Actions</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">PO #</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Item</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Supplier</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Quantity</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Price</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Total</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
               </tr>
             </thead>
-            <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+            <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
               {purchaseOrders.map((po) => (
                 <tr key={po.id}>
                   <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">
-                    #{po.id.slice(-6)}
+                    #{po.id?.slice(-6) || 'N/A'}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
                     {po.itemName || po.itemId}
@@ -1228,7 +1459,7 @@ const Accountant = () => {
                       po.status === 'pendingApproval' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' :
                       'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300'
                     }`}>
-                      {po.status}
+                      {po.status?.replace('pendingApproval', 'Pending') || 'Unknown'}
                     </span>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
@@ -1239,14 +1470,14 @@ const Accountant = () => {
                       <>
                         <button
                           onClick={() => handleApprovePurchaseOrder(po.id)}
+                          disabled={formSubmitting}
                           className="text-green-600 hover:text-green-700 mr-2"
                           title="Approve"
                         >
                           <FontAwesomeIcon icon={faCheckCircle} />
                         </button>
                         <button
-                          onClick={() => {/* Reject */}}
-                          className="text-red-600 hover:text-red-700 mr-2"
+                          className="text-red-600 hover:text-red-700"
                           title="Reject"
                         >
                           <FontAwesomeIcon icon={faTimesCircle} />
@@ -1256,6 +1487,7 @@ const Accountant = () => {
                     {po.status === 'approved' && (
                       <button
                         onClick={() => handleConfirmDelivery(po.id)}
+                        disabled={formSubmitting}
                         className="text-blue-600 hover:text-blue-700"
                         title="Confirm Delivery"
                       >
@@ -1270,6 +1502,13 @@ const Accountant = () => {
                   </td>
                 </tr>
               ))}
+              {purchaseOrders.length === 0 && (
+                <tr>
+                  <td colSpan="9" className="px-6 py-8 text-center text-gray-500">
+                    No purchase orders found
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -1278,111 +1517,88 @@ const Accountant = () => {
   );
 
   const renderExpenses = () => (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fadeIn">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Expense Tracking</h2>
-        <button
-          onClick={() => setShowExpenseModal(true)}
-          className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition flex items-center"
-        >
-          <FontAwesomeIcon icon={faPlus} className="mr-2" />
-          Add Expense
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setShowExpenseModal(true)}
+            className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition flex items-center"
+          >
+            <FontAwesomeIcon icon={faPlus} className="mr-2" />
+            Add Expense
+          </button>
+          <button
+            onClick={refreshAllData}
+            disabled={refreshing}
+            className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition disabled:opacity-50 flex items-center"
+          >
+            <FontAwesomeIcon icon={faSync} className={`mr-2 ${refreshing ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </div>
       </div>
 
       {/* Expense Summary */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
           <p className="text-sm text-gray-600 dark:text-gray-400">Total Expenses</p>
           <p className="text-2xl font-bold text-red-600">{formatCurrency(stats.totalExpenses)}</p>
         </div>
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
           <p className="text-sm text-gray-600 dark:text-gray-400">This Period</p>
           <p className="text-2xl font-bold text-blue-600">
-            {formatCurrency(expenses.reduce((sum, e) => sum + e.amount, 0))}
+            {formatCurrency(expenses.reduce((sum, e) => sum + (e.amount || 0), 0))}
           </p>
         </div>
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
           <p className="text-sm text-gray-600 dark:text-gray-400">Categories</p>
           <p className="text-2xl font-bold text-purple-600">{Object.keys(expensesByCategory).length}</p>
         </div>
       </div>
 
-      {/* Expenses by Category Chart */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Expenses by Category</h3>
-          <div className="h-64">
-            {Object.keys(expensesByCategory).length > 0 ? (
-              <Pie
-                data={{
-                  labels: Object.keys(expensesByCategory),
-                  datasets: [{
-                    data: Object.values(expensesByCategory),
-                    backgroundColor: [
-                      '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF', '#FF9F40'
-                    ]
-                  }]
-                }}
-                options={{
-                  responsive: true,
-                  maintainAspectRatio: false
-                }}
-              />
-            ) : (
-              <p className="text-center text-gray-500 py-8">No expense data</p>
-            )}
-          </div>
-        </div>
-
-        {/* Recent Expenses */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Recent Expenses</h3>
-          <div className="space-y-4">
-            {expenses.slice(0, 10).map((expense) => (
-              <div key={expense.id} className="flex justify-between items-center border-b border-gray-100 dark:border-gray-700 pb-2">
-                <div>
-                  <p className="font-medium text-gray-900 dark:text-white">{expense.description}</p>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">
-                    {expense.category} • {formatDate(expense.createdAt)}
-                  </p>
-                </div>
-                <p className="font-medium text-red-600">{formatCurrency(expense.amount)}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
       {/* Expenses Table */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg overflow-hidden">
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
             <thead className="bg-gray-50 dark:bg-gray-900">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Date</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Category</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Description</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Department</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Amount</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Payment Method</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Description</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Department</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Amount</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Payment Method</th>
               </tr>
             </thead>
-            <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+            <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
               {expenses.map((expense) => (
                 <tr key={expense.id}>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
                     {formatDate(expense.createdAt)}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">{expense.category}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">{expense.description}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
+                    {expense.category?.replace('_', ' ') || 'General'}
+                  </td>
+                  <td className="px-6 py-4 text-sm text-gray-900 dark:text-white">{expense.description}</td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
                     {expense.departmentId || 'General'}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-red-600 font-medium">{formatCurrency(expense.amount)}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">{expense.paymentMethod}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-red-600 font-medium">
+                    {formatCurrency(expense.amount)}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
+                    {expense.paymentMethod?.replace('_', ' ') || 'Cash'}
+                  </td>
                 </tr>
               ))}
+              {expenses.length === 0 && (
+                <tr>
+                  <td colSpan="6" className="px-6 py-8 text-center text-gray-500">
+                    No expenses recorded
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -1390,120 +1606,144 @@ const Accountant = () => {
     </div>
   );
 
-  const renderBudget = () => (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-        <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Budget Management</h2>
-        <button
-          onClick={() => setShowBudgetModal(true)}
-          className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition flex items-center"
-        >
-          <FontAwesomeIcon icon={faPlus} className="mr-2" />
-          Set Department Budget
-        </button>
-      </div>
+  const renderBudget = () => {
+    const totalMonthlyBudget = departments.reduce((sum, dept) => sum + (dept.monthlyBudget || 0), 0);
+    const totalSpent = stats.totalExpenses || 0;
+    const totalRevenue = stats.totalRevenue || 1;
+    const budgetUtilization = totalRevenue > 0 ? (totalSpent / totalRevenue) * 100 : 0;
 
-      {/* Budget Overview */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-          <p className="text-sm text-gray-600 dark:text-gray-400">Total Monthly Budget</p>
-          <p className="text-2xl font-bold text-blue-600">
-            {formatCurrency(departments.reduce((sum, dept) => sum + (dept.monthlyBudget || 0), 0))}
-          </p>
+    return (
+      <div className="space-y-6 animate-fadeIn">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Budget Management</h2>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setShowBudgetModal(true)}
+              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition flex items-center"
+            >
+              <FontAwesomeIcon icon={faPlus} className="mr-2" />
+              Set Department Budget
+            </button>
+            <button
+              onClick={refreshAllData}
+              disabled={refreshing}
+              className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition disabled:opacity-50 flex items-center"
+            >
+              <FontAwesomeIcon icon={faSync} className={`mr-2 ${refreshing ? 'animate-spin' : ''}`} />
+              Refresh
+            </button>
+          </div>
         </div>
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-          <p className="text-sm text-gray-600 dark:text-gray-400">Total Spent</p>
-          <p className="text-2xl font-bold text-red-600">{formatCurrency(stats.totalExpenses)}</p>
+
+        {/* Budget Overview */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
+            <p className="text-sm text-gray-600 dark:text-gray-400">Total Monthly Budget</p>
+            <p className="text-2xl font-bold text-blue-600">{formatCurrency(totalMonthlyBudget)}</p>
+          </div>
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
+            <p className="text-sm text-gray-600 dark:text-gray-400">Total Spent</p>
+            <p className="text-2xl font-bold text-red-600">{formatCurrency(totalSpent)}</p>
+          </div>
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5">
+            <p className="text-sm text-gray-600 dark:text-gray-400">Budget Utilization</p>
+            <p className="text-2xl font-bold text-green-600">{budgetUtilization.toFixed(1)}%</p>
+          </div>
         </div>
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-          <p className="text-sm text-gray-600 dark:text-gray-400">Budget Utilization</p>
-          <p className="text-2xl font-bold text-green-600">
-            {stats.totalExpenses > 0 && stats.totalRevenue > 0 
-              ? ((stats.totalExpenses / stats.totalRevenue) * 100).toFixed(1) 
-              : '0'}%
-          </p>
-        </div>
-      </div>
 
-      {/* Department Budget Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {departments.map((dept) => {
-          const budget = dept.monthlyBudget || 0;
-          const spent = dept.spentThisMonth || 0;
-          const remaining = budget - spent;
-          const usagePercentage = budget > 0 ? (spent / budget) * 100 : 0;
+        {/* Department Budget Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {departments.map((dept) => {
+            const budget = dept.monthlyBudget || 0;
+            const spent = dept.spentThisMonth || 0;
+            const remaining = budget - spent;
+            const usagePercentage = budget > 0 ? (spent / budget) * 100 : 0;
 
-          return (
-            <div key={dept.id} className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-              <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">{dept.name}</h3>
-              
-              <div className="space-y-3">
-                <div>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">Monthly Budget</p>
-                  <p className="text-xl font-bold text-blue-600">{formatCurrency(budget)}</p>
+            return (
+              <div key={dept.id} className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5 hover:shadow-xl transition">
+                <div className="flex justify-between items-start mb-3">
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{dept.name}</h3>
+                  <FontAwesomeIcon icon={faBuilding} className="text-gray-400" />
                 </div>
+                
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">Monthly Budget</p>
+                    <p className="text-xl font-bold text-blue-600">{formatCurrency(budget)}</p>
+                  </div>
 
-                <div>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">Spent</p>
-                  <p className="text-lg font-medium text-red-600">{formatCurrency(spent)}</p>
-                </div>
+                  <div>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">Spent</p>
+                    <p className="text-lg font-medium text-red-600">{formatCurrency(spent)}</p>
+                  </div>
 
-                <div>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">Remaining</p>
-                  <p className={`text-lg font-medium ${remaining >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                    {formatCurrency(Math.abs(remaining))}
-                    {remaining < 0 && ' (Over budget)'}
-                  </p>
-                </div>
+                  <div>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">Remaining</p>
+                    <p className={`text-lg font-medium ${remaining >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                      {formatCurrency(Math.abs(remaining))}
+                      {remaining < 0 && ' (Over budget)'}
+                    </p>
+                  </div>
 
-                <div className="relative pt-1">
-                  <div className="flex mb-2 items-center justify-between">
-                    <div>
-                      <span className="text-xs font-semibold inline-block text-blue-600">
-                        {usagePercentage.toFixed(1)}% Used
-                      </span>
+                  <div className="relative pt-1">
+                    <div className="flex mb-2 items-center justify-between">
+                      <div>
+                        <span className="text-xs font-semibold inline-block text-blue-600">
+                          {usagePercentage.toFixed(1)}% Used
+                        </span>
+                      </div>
+                    </div>
+                    <div className="overflow-hidden h-2 mb-4 text-xs flex rounded-full bg-blue-200">
+                      <div
+                        style={{ width: `${Math.min(usagePercentage, 100)}%` }}
+                        className={`shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center rounded-full ${
+                          usagePercentage > 90 ? 'bg-red-500' : 'bg-blue-500'
+                        }`}
+                      />
                     </div>
                   </div>
-                  <div className="overflow-hidden h-2 mb-4 text-xs flex rounded bg-blue-200">
-                    <div
-                      style={{ width: `${Math.min(usagePercentage, 100)}%` }}
-                      className={`shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center ${
-                        usagePercentage > 90 ? 'bg-red-500' : 'bg-blue-500'
-                      }`}
-                    />
-                  </div>
-                </div>
 
-                <button
-                  onClick={() => {
-                    setBudgetForm({
-                      departmentId: dept.id,
-                      monthly: dept.monthlyBudget || '',
-                      year: new Date().getFullYear(),
-                      notes: ''
-                    });
-                    setShowBudgetModal(true);
-                  }}
-                  className="text-sm text-blue-600 hover:text-blue-700"
-                >
-                  Update Budget
-                </button>
+                  <button
+                    onClick={() => {
+                      setBudgetForm({
+                        departmentId: dept.id,
+                        monthly: dept.monthlyBudget || '',
+                        year: new Date().getFullYear(),
+                        notes: ''
+                      });
+                      setShowBudgetModal(true);
+                    }}
+                    className="text-sm text-blue-600 hover:text-blue-700 font-medium"
+                  >
+                    Update Budget →
+                  </button>
+                </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
+
+        {departments.length === 0 && (
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-12 text-center">
+            <FontAwesomeIcon icon={faWallet} className="h-16 w-16 text-gray-400 mx-auto mb-4" />
+            <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">No Departments Found</h3>
+            <p className="text-gray-600 dark:text-gray-400">
+              Configure departments in the admin panel to manage budgets.
+            </p>
+          </div>
+        )}
       </div>
-    </div>
-  );
+    );
+  };
 
   const renderReports = () => (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fadeIn">
       <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Financial Reports</h2>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {/* Inventory Report Card */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-lg transition">
-          <div className="flex items-center justify-center w-12 h-12 bg-blue-100 dark:bg-blue-900 rounded-lg mb-4">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 hover:shadow-xl transition group">
+          <div className="flex items-center justify-center w-12 h-12 bg-blue-100 dark:bg-blue-900 rounded-xl mb-4 group-hover:scale-110 transition">
             <FontAwesomeIcon icon={faBoxes} className="h-6 w-6 text-blue-600 dark:text-blue-400" />
           </div>
           <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">Inventory Report</h3>
@@ -1512,15 +1752,15 @@ const Accountant = () => {
           </p>
           <button
             onClick={() => setShowReportModal(true)}
-            className="text-blue-600 hover:text-blue-700 font-medium text-sm"
+            className="text-blue-600 hover:text-blue-700 font-medium text-sm flex items-center"
           >
-            Generate Report →
+            Generate Report <FontAwesomeIcon icon={faArrowRight} className="ml-1" />
           </button>
         </div>
 
         {/* Financial Summary Card */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-lg transition">
-          <div className="flex items-center justify-center w-12 h-12 bg-green-100 dark:bg-green-900 rounded-lg mb-4">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 hover:shadow-xl transition group">
+          <div className="flex items-center justify-center w-12 h-12 bg-green-100 dark:bg-green-900 rounded-xl mb-4 group-hover:scale-110 transition">
             <FontAwesomeIcon icon={faChartLine} className="h-6 w-6 text-green-600 dark:text-green-400" />
           </div>
           <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">Financial Summary</h3>
@@ -1529,15 +1769,15 @@ const Accountant = () => {
           </p>
           <button
             onClick={() => handleExportData('financial')}
-            className="text-green-600 hover:text-green-700 font-medium text-sm"
+            className="text-green-600 hover:text-green-700 font-medium text-sm flex items-center"
           >
-            Export Data →
+            Export Data <FontAwesomeIcon icon={faArrowRight} className="ml-1" />
           </button>
         </div>
 
         {/* Salary Report Card */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-lg transition">
-          <div className="flex items-center justify-center w-12 h-12 bg-purple-100 dark:bg-purple-900 rounded-lg mb-4">
+        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6 hover:shadow-xl transition group">
+          <div className="flex items-center justify-center w-12 h-12 bg-purple-100 dark:bg-purple-900 rounded-xl mb-4 group-hover:scale-110 transition">
             <FontAwesomeIcon icon={faMoneyCheck} className="h-6 w-6 text-purple-600 dark:text-purple-400" />
           </div>
           <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">Salary Report</h3>
@@ -1545,16 +1785,19 @@ const Accountant = () => {
             View salary history, pending payments, and payroll summary.
           </p>
           <button
-            onClick={() => setActiveTab('salaries')}
-            className="text-purple-600 hover:text-purple-700 font-medium text-sm"
+            onClick={() => {
+              setActiveTab('salaries');
+              setSalaryView('history');
+            }}
+            className="text-purple-600 hover:text-purple-700 font-medium text-sm flex items-center"
           >
-            View Salaries →
+            View Salaries <FontAwesomeIcon icon={faArrowRight} className="ml-1" />
           </button>
         </div>
       </div>
 
       {/* Date Range for Reports */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-6">
         <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Custom Report Period</h3>
         <div className="flex flex-col sm:flex-row gap-4">
           <DatePicker
@@ -1568,22 +1811,77 @@ const Accountant = () => {
               });
             }}
             className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
+            placeholderText="Select date range"
           />
           <button
             onClick={handleGenerateReport}
-            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+            disabled={loading}
+            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:opacity-50"
           >
-            Generate Custom Report
+            {loading ? 'Generating...' : 'Generate Custom Report'}
           </button>
         </div>
       </div>
     </div>
   );
 
+  // Salary History Modal
+  const renderSalaryHistoryModal = () => (
+    showSalaryHistoryModal && selectedSalaryHistory && (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+        <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-4xl w-full max-h-[80vh] overflow-y-auto">
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-xl font-semibold text-gray-900 dark:text-white">
+              Salary Details - {new Date(selectedSalaryHistory.year, selectedSalaryHistory.month - 1).toLocaleString('default', { month: 'long' })} {selectedSalaryHistory.year}
+            </h3>
+            <button
+              onClick={() => {
+                setShowSalaryHistoryModal(false);
+                setSelectedSalaryHistory(null);
+              }}
+              className="text-gray-500 hover:text-gray-700"
+            >
+              <FontAwesomeIcon icon={faTimes} size="lg" />
+            </button>
+          </div>
+          
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+            <div className="bg-blue-50 dark:bg-blue-900/30 p-4 rounded-lg text-center">
+              <p className="text-sm text-gray-600">Total Staff</p>
+              <p className="text-2xl font-bold text-blue-600">{selectedSalaryHistory.count}</p>
+            </div>
+            <div className="bg-green-50 dark:bg-green-900/30 p-4 rounded-lg text-center">
+              <p className="text-sm text-gray-600">Total Salary</p>
+              <p className="text-2xl font-bold text-green-600">{formatCurrency(selectedSalaryHistory.total)}</p>
+            </div>
+            <div className="bg-purple-50 dark:bg-purple-900/30 p-4 rounded-lg text-center">
+              <p className="text-sm text-gray-600">Paid Amount</p>
+              <p className="text-2xl font-bold text-purple-600">{formatCurrency(selectedSalaryHistory.paid)}</p>
+            </div>
+          </div>
+          
+          <div className="text-center text-gray-500 py-8">
+            <FontAwesomeIcon icon={faReceipt} className="h-12 w-12 mb-3 text-gray-400" />
+            <p>Select a staff member to view individual salary history and receipts</p>
+            <button
+              onClick={() => {
+                setShowSalaryHistoryModal(false);
+                setSalaryView('history');
+              }}
+              className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+            >
+              Go to Salary History
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  );
+
   // Expense Modal
   const renderExpenseModal = () => (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+      <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-xl font-semibold text-gray-900 dark:text-white">Add Expense</h3>
           <button
@@ -1591,7 +1889,7 @@ const Accountant = () => {
               setShowExpenseModal(false);
               resetExpenseForm();
             }}
-            className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+            className="text-gray-500 hover:text-gray-700"
           >
             <FontAwesomeIcon icon={faTimes} size="lg" />
           </button>
@@ -1618,6 +1916,7 @@ const Accountant = () => {
                 <option value="marketing">Marketing</option>
                 <option value="other">Other</option>
               </select>
+              {formErrors.category && <p className="mt-1 text-xs text-red-600">{formErrors.category}</p>}
             </div>
 
             <div>
@@ -1635,9 +1934,7 @@ const Accountant = () => {
                 min="0"
                 step="0.01"
               />
-              {formErrors.amount && (
-                <p className="mt-1 text-xs text-red-600">{formErrors.amount}</p>
-              )}
+              {formErrors.amount && <p className="mt-1 text-xs text-red-600">{formErrors.amount}</p>}
             </div>
 
             <div className="col-span-2">
@@ -1653,9 +1950,7 @@ const Accountant = () => {
                 }`}
                 placeholder="Describe the expense..."
               />
-              {formErrors.description && (
-                <p className="mt-1 text-xs text-red-600">{formErrors.description}</p>
-              )}
+              {formErrors.description && <p className="mt-1 text-xs text-red-600">{formErrors.description}</p>}
             </div>
 
             <div>
@@ -1716,7 +2011,7 @@ const Accountant = () => {
             </div>
           </div>
 
-          <div className="bg-blue-50 dark:bg-blue-900 p-4 rounded-lg">
+          <div className="bg-blue-50 dark:bg-blue-900/30 p-4 rounded-lg">
             <p className="text-sm text-blue-800 dark:text-blue-200">
               <FontAwesomeIcon icon={faInfoCircle} className="mr-2" />
               Expenses will be recorded and reflected in financial reports.
@@ -1736,10 +2031,10 @@ const Accountant = () => {
             </button>
             <button
               type="submit"
-              disabled={loading}
+              disabled={formSubmitting}
               className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition disabled:opacity-50 flex items-center"
             >
-              {loading ? (
+              {formSubmitting ? (
                 <>
                   <FontAwesomeIcon icon={faSpinner} className="animate-spin mr-2" />
                   Adding...
@@ -1757,7 +2052,7 @@ const Accountant = () => {
   // Purchase Order Modal
   const renderPurchaseModal = () => (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+      <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-xl font-semibold text-gray-900 dark:text-white">Create Purchase Order</h3>
           <button
@@ -1765,7 +2060,7 @@ const Accountant = () => {
               setShowPurchaseModal(false);
               resetPurchaseForm();
             }}
-            className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+            className="text-gray-500 hover:text-gray-700"
           >
             <FontAwesomeIcon icon={faTimes} size="lg" />
           </button>
@@ -1791,9 +2086,7 @@ const Accountant = () => {
                   </option>
                 ))}
               </select>
-              {formErrors.itemId && (
-                <p className="mt-1 text-xs text-red-600">{formErrors.itemId}</p>
-              )}
+              {formErrors.itemId && <p className="mt-1 text-xs text-red-600">{formErrors.itemId}</p>}
             </div>
 
             <div>
@@ -1810,9 +2103,7 @@ const Accountant = () => {
                 placeholder="0"
                 min="1"
               />
-              {formErrors.quantity && (
-                <p className="mt-1 text-xs text-red-600">{formErrors.quantity}</p>
-              )}
+              {formErrors.quantity && <p className="mt-1 text-xs text-red-600">{formErrors.quantity}</p>}
             </div>
 
             <div>
@@ -1830,9 +2121,7 @@ const Accountant = () => {
                 min="0"
                 step="0.01"
               />
-              {formErrors.price && (
-                <p className="mt-1 text-xs text-red-600">{formErrors.price}</p>
-              )}
+              {formErrors.price && <p className="mt-1 text-xs text-red-600">{formErrors.price}</p>}
             </div>
 
             <div className="col-span-2">
@@ -1848,9 +2137,7 @@ const Accountant = () => {
                 }`}
                 placeholder="Supplier name"
               />
-              {formErrors.supplier && (
-                <p className="mt-1 text-xs text-red-600">{formErrors.supplier}</p>
-              )}
+              {formErrors.supplier && <p className="mt-1 text-xs text-red-600">{formErrors.supplier}</p>}
             </div>
 
             <div>
@@ -1916,7 +2203,7 @@ const Accountant = () => {
             </div>
           </div>
 
-          <div className="bg-yellow-50 dark:bg-yellow-900 p-4 rounded-lg">
+          <div className="bg-yellow-50 dark:bg-yellow-900/30 p-4 rounded-lg">
             <p className="text-sm text-yellow-800 dark:text-yellow-200">
               <FontAwesomeIcon icon={faInfoCircle} className="mr-2" />
               Purchase orders require approval. Once delivered, inventory will be automatically updated.
@@ -1936,10 +2223,10 @@ const Accountant = () => {
             </button>
             <button
               type="submit"
-              disabled={loading}
+              disabled={formSubmitting}
               className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition disabled:opacity-50 flex items-center"
             >
-              {loading ? (
+              {formSubmitting ? (
                 <>
                   <FontAwesomeIcon icon={faSpinner} className="animate-spin mr-2" />
                   Creating...
@@ -1957,7 +2244,7 @@ const Accountant = () => {
   // Budget Modal
   const renderBudgetModal = () => (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-md w-full">
+      <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-md w-full">
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-xl font-semibold text-gray-900 dark:text-white">Set Department Budget</h3>
           <button
@@ -1965,7 +2252,7 @@ const Accountant = () => {
               setShowBudgetModal(false);
               resetBudgetForm();
             }}
-            className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+            className="text-gray-500 hover:text-gray-700"
           >
             <FontAwesomeIcon icon={faTimes} size="lg" />
           </button>
@@ -1988,9 +2275,7 @@ const Accountant = () => {
                 <option key={dept.id} value={dept.id}>{dept.name}</option>
               ))}
             </select>
-            {formErrors.departmentId && (
-              <p className="mt-1 text-xs text-red-600">{formErrors.departmentId}</p>
-            )}
+            {formErrors.departmentId && <p className="mt-1 text-xs text-red-600">{formErrors.departmentId}</p>}
           </div>
 
           <div>
@@ -2007,9 +2292,7 @@ const Accountant = () => {
               placeholder="0"
               min="0"
             />
-            {formErrors.monthly && (
-              <p className="mt-1 text-xs text-red-600">{formErrors.monthly}</p>
-            )}
+            {formErrors.monthly && <p className="mt-1 text-xs text-red-600">{formErrors.monthly}</p>}
           </div>
 
           <div>
@@ -2052,10 +2335,10 @@ const Accountant = () => {
             </button>
             <button
               type="submit"
-              disabled={loading}
+              disabled={formSubmitting}
               className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:opacity-50"
             >
-              {loading ? 'Setting...' : 'Set Budget'}
+              {formSubmitting ? 'Setting...' : 'Set Budget'}
             </button>
           </div>
         </form>
@@ -2066,12 +2349,12 @@ const Accountant = () => {
   // Report Modal
   const renderReportModal = () => (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-2xl w-full">
+      <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-2xl w-full">
         <div className="flex justify-between items-center mb-4">
           <h3 className="text-xl font-semibold text-gray-900 dark:text-white">Generate Inventory Report</h3>
           <button
             onClick={() => setShowReportModal(false)}
-            className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+            className="text-gray-500 hover:text-gray-700"
           >
             <FontAwesomeIcon icon={faTimes} size="lg" />
           </button>
@@ -2082,7 +2365,7 @@ const Accountant = () => {
             Generate a comprehensive inventory report for the selected period.
           </p>
 
-          <div className="bg-blue-50 dark:bg-blue-900 p-4 rounded-lg">
+          <div className="bg-blue-50 dark:bg-blue-900/30 p-4 rounded-lg">
             <p className="text-sm text-blue-800 dark:text-blue-200">
               <FontAwesomeIcon icon={faInfoCircle} className="mr-2" />
               The report will include:
@@ -2117,19 +2400,31 @@ const Accountant = () => {
     </div>
   );
 
+  // Loading State
+  if (loading && activeTab === 'dashboard') {
+    return (
+      <div className="min-h-screen bg-gray-100 dark:bg-gray-900 flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-600 mx-auto"></div>
+          <p className="mt-4 text-gray-600 dark:text-gray-400">Loading dashboard...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gray-100 dark:bg-gray-900">
       {/* Sidebar */}
-      <div className="fixed inset-y-0 left-0 w-64 bg-gradient-to-b from-green-800 to-green-900 text-white hidden lg:block">
+      <div className="fixed inset-y-0 left-0 w-64 bg-gradient-to-b from-green-800 to-green-900 text-white hidden lg:block z-20">
         <div className="flex flex-col h-full">
           {/* Logo */}
-          <div className="p-4 border-b border-green-700">
+          <div className="p-5 border-b border-green-700">
             <h1 className="text-xl font-bold text-white">MediCare Plus</h1>
-            <p className="text-sm text-green-300">Accountant Portal</p>
+            <p className="text-sm text-green-300 mt-1">Accountant Portal</p>
           </div>
 
           {/* Accountant Info */}
-          <div className="p-4 border-b border-green-700">
+          <div className="p-5 border-b border-green-700">
             <div className="flex items-center">
               <div className="h-10 w-10 bg-green-600 rounded-full flex items-center justify-center">
                 <FontAwesomeIcon icon={faCalculator} className="h-5 w-5 text-white" />
@@ -2148,9 +2443,9 @@ const Accountant = () => {
                 <li key={tab.id}>
                   <button
                     onClick={() => setActiveTab(tab.id)}
-                    className={`w-full flex items-center px-4 py-2 rounded-lg transition ${
+                    className={`w-full flex items-center px-4 py-3 rounded-xl transition ${
                       activeTab === tab.id
-                        ? 'bg-green-600 text-white'
+                        ? 'bg-green-600 text-white shadow-lg'
                         : 'text-green-200 hover:bg-green-700'
                     }`}
                   >
@@ -2164,18 +2459,18 @@ const Accountant = () => {
 
           {/* Quick Stats */}
           <div className="p-4 border-t border-green-700">
-            <div className="space-y-2 text-sm">
+            <div className="bg-green-700/30 rounded-xl p-3 space-y-2 text-sm">
               <div className="flex justify-between">
-                <span className="text-green-300">Low Stock:</span>
-                <span className="text-white font-bold">{stats.lowStockCount}</span>
+                <span className="text-green-300">Staff:</span>
+                <span className="text-white font-bold">{staffList.length}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-green-300">Pending Salaries:</span>
                 <span className="text-white font-bold">{stats.pendingSalaryCount}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-green-300">Budget Used:</span>
-                <span className="text-white font-bold">{stats.budgetUsed.toFixed(1)}%</span>
+                <span className="text-green-300">Low Stock Items:</span>
+                <span className="text-white font-bold">{stats.lowStockCount}</span>
               </div>
             </div>
           </div>
@@ -2184,7 +2479,7 @@ const Accountant = () => {
           <div className="p-4 border-t border-green-700">
             <button
               onClick={handleLogout}
-              className="w-full flex items-center px-4 py-2 text-green-200 hover:bg-red-600 hover:text-white rounded-lg transition"
+              className="w-full flex items-center px-4 py-3 text-green-200 hover:bg-red-600 hover:text-white rounded-xl transition"
             >
               <FontAwesomeIcon icon={faSignOutAlt} className="mr-3" />
               Logout
@@ -2194,40 +2489,43 @@ const Accountant = () => {
       </div>
 
       {/* Mobile Header */}
-      <div className="lg:hidden bg-green-800 text-white p-4">
-        <h1 className="text-xl font-bold text-white">MediCare Plus Accountant</h1>
+      <div className="lg:hidden bg-gradient-to-r from-green-800 to-green-900 text-white p-4 sticky top-0 z-10">
+        <div className="flex justify-between items-center">
+          <div>
+            <h1 className="text-xl font-bold">MediCare Plus</h1>
+            <p className="text-xs text-green-300">Accountant Portal</p>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="p-2 bg-green-700 rounded-lg"
+          >
+            <FontAwesomeIcon icon={faSignOutAlt} />
+          </button>
+        </div>
+      </div>
+
+      {/* Mobile Tab Navigation */}
+      <div className="lg:hidden p-4">
+        <select
+          value={activeTab}
+          onChange={(e) => setActiveTab(e.target.value)}
+          className="w-full px-4 py-3 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-xl focus:outline-none focus:ring-2 focus:ring-green-500"
+        >
+          {tabs.map((tab) => (
+            <option key={tab.id} value={tab.id}>{tab.label}</option>
+          ))}
+        </select>
       </div>
 
       {/* Main Content */}
-      <div className="lg:ml-64 p-4 sm:p-8">
-        {/* Mobile Tab Navigation */}
-        <div className="lg:hidden mb-4">
-          <select
-            value={activeTab}
-            onChange={(e) => setActiveTab(e.target.value)}
-            className="w-full px-3 py-2 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-lg"
-          >
-            {tabs.map((tab) => (
-              <option key={tab.id} value={tab.id}>{tab.label}</option>
-            ))}
-          </select>
-        </div>
-
-        {loading ? (
-          <div className="flex justify-center items-center h-64">
-            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-green-600"></div>
-          </div>
-        ) : (
-          <>
-            {activeTab === 'dashboard' && renderDashboard()}
-            {activeTab === 'salaries' && renderSalaryManagement()}
-            {activeTab === 'inventory' && renderInventory()}
-            {activeTab === 'purchases' && renderPurchaseOrders()}
-            {activeTab === 'expenses' && renderExpenses()}
-            {activeTab === 'budget' && renderBudget()}
-            {activeTab === 'reports' && renderReports()}
-          </>
-        )}
+      <div className="lg:ml-64 p-4 sm:p-6">
+        {activeTab === 'dashboard' && renderDashboard()}
+        {activeTab === 'salaries' && renderSalaryManagement()}
+        {activeTab === 'inventory' && renderInventory()}
+        {activeTab === 'purchases' && renderPurchaseOrders()}
+        {activeTab === 'expenses' && renderExpenses()}
+        {activeTab === 'budget' && renderBudget()}
+        {activeTab === 'reports' && renderReports()}
       </div>
 
       {/* Modals */}
@@ -2235,6 +2533,7 @@ const Accountant = () => {
       {showPurchaseModal && renderPurchaseModal()}
       {showBudgetModal && renderBudgetModal()}
       {showReportModal && renderReportModal()}
+      {showSalaryHistoryModal && renderSalaryHistoryModal()}
     </div>
   );
 };

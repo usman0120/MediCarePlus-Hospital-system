@@ -11,7 +11,11 @@ import {
   faCalendarCheck,
   faInfoCircle,
   faUserPlus,
+  faEye,
   faBed,
+   faUser,
+   faHistory,
+   faCheckCircle,
   faClock,
   faAmbulance,
   faHospital,
@@ -31,12 +35,20 @@ import PhoneInput from 'react-phone-input-2';
 import 'react-phone-input-2/lib/style.css';
 import { logoutUser } from '../auth';
 import { getContactMessages } from '../database';
-
+import { db } from '../firebase';
 // Import Appointment Components
 import AppointmentBooking from '../components/appointments/AppointmentBooking';
 import AppointmentList from '../components/appointments/AppointmentList';
 import AppointmentDetails from '../components/appointments/AppointmentDetails';
-
+import PaymentVerificationModal from '../components/PaymentVerificationModal';
+import TransactionHistory from '../components/TransactionHistory';
+import { 
+  query, 
+  collection, 
+  where, 
+  orderBy, 
+  getDocs 
+} from 'firebase/firestore';
 import {
   getAppointmentsByDate,
   searchPatients,
@@ -179,6 +191,25 @@ const Reception = () => {
     newTime: '',
     reason: ''
   });
+  const [showPaymentVerificationModal, setShowPaymentVerificationModal] = useState(false);
+  const [selectedAppointmentForPayment, setSelectedAppointmentForPayment] = useState(null);
+const [bookingPatientId, setBookingPatientId] = useState(null);
+const [showPatientSelector, setShowPatientSelector] = useState(false);
+// Payment History State
+const [transactionHistory, setTransactionHistory] = useState([]);
+const [showTransactionHistory, setShowTransactionHistory] = useState(false);
+const [appointmentFilters, setAppointmentFilters] = useState({
+  doctorId: 'all',
+  status: 'all',
+  dateRange: 'today'
+});
+const [availableDoctorsList, setAvailableDoctorsList] = useState([]);
+
+// Add near other useState declarations (around line 100-150)
+const [discharges, setDischarges] = useState([]);
+const [loadingDischarges, setLoadingDischarges] = useState(false);
+const [showDischargeDetails, setShowDischargeDetails] = useState(false);
+const [selectedDischarge, setSelectedDischarge] = useState(null);
 
   // ==================== FORM STATES ====================
   const [walkInData, setWalkInData] = useState({
@@ -259,6 +290,55 @@ const Reception = () => {
 
   // ==================== DATA FETCHING FUNCTIONS ====================
 
+  const fetchTransactionHistory = useCallback(async () => {
+  try {
+    // Fetch all appointments with payment status
+    const allAppointmentsQuery = query(
+      collection(db, 'appointments'),
+      where('paymentStatus', 'in', ['paid', 'pending']),
+      orderBy('paidAt', 'desc')
+    );
+    
+    const snapshot = await getDocs(allAppointmentsQuery);
+    const transactions = [];
+    
+    for (const doc of snapshot.docs) {
+      const apt = doc.data();
+      if (apt.paymentStatus === 'paid') {
+        // Get doctor and patient details
+        const [doctorData, patientData] = await Promise.all([
+          getUserById(apt.doctorId),
+          getUserById(apt.patientId)
+        ]);
+        
+        transactions.push({
+          id: doc.id,
+          ...apt,
+          doctorName: doctorData.success ? doctorData.data.fullName : 'Unknown',
+          patientName: patientData.success ? patientData.data.fullName : 'Unknown',
+          transactionDate: apt.paidAt?.toDate?.() || apt.createdAt?.toDate?.(),
+          challanNo: `APT-${doc.id.slice(-8)}`
+        });
+      }
+    }
+    
+    setTransactionHistory(transactions);
+  } catch (error) {
+    console.error('Error fetching transaction history:', error);
+  }
+}, []);
+
+const fetchAvailableDoctorsList = useCallback(async () => {
+  try {
+    const result = await getUsersByRole('doctor');
+    if (result.success) {
+      setAvailableDoctorsList(result.data.filter(d => d.accountStatus === 'active'));
+    }
+  } catch (error) {
+    console.error('Error fetching doctors list:', error);
+  }
+}, []);
+
   const fetchMessagesForStats = useCallback(async () => {
     try {
       const result = await getContactMessages({}, 'receptionist', currentUser?.uid);
@@ -270,6 +350,17 @@ const Reception = () => {
     }
   }, [currentUser]);
 
+
+useEffect(() => {
+  if (activeTab === 'payments') {
+    fetchTransactionHistory();
+    fetchAvailableDoctorsList();
+  }
+}, [activeTab, fetchTransactionHistory, fetchAvailableDoctorsList]);
+
+useEffect(() => {
+  fetchAvailableDoctorsList();
+}, [fetchAvailableDoctorsList]);
 
   useEffect(() => {
     if (activeTab === 'support') {
@@ -349,27 +440,63 @@ const enrichAppointmentsWithNames = useCallback(async (appointments) => {
 }, []);
 
 const fetchAppointments = useCallback(async () => {
-  // Cancel previous request if any
   if (abortControllerRef.current) {
     abortControllerRef.current.abort();
   }
   
-  // Create new abort controller
   abortControllerRef.current = new AbortController();
   
   try {
-    const dateStr = selectedDate.toISOString().split('T')[0];
-    console.log('Fetching appointments for date:', dateStr);
+    let dateStr = '';
+    if (appointmentFilters.dateRange === 'today' || appointmentFilters.dateRange === 'tomorrow') {
+      const targetDate = appointmentFilters.dateRange === 'today' ? new Date() : new Date(Date.now() + 86400000);
+      dateStr = targetDate.toISOString().split('T')[0];
+    } else if (appointmentFilters.dateRange === 'all') {
+      // For 'all', we need to fetch with a different approach
+      const q = query(collection(db, 'appointments'));
+      const snapshot = await getDocs(q);
+      const appointments = [];
+      
+      for (const doc of snapshot.docs) {
+        const apt = { id: doc.id, ...doc.data() };
+        // Enrich with names
+        if (apt.patientId) {
+          const patientResult = await getUserById(apt.patientId);
+          if (patientResult.success) {
+            apt.patientName = patientResult.data.fullName;
+          }
+        }
+        if (apt.doctorId) {
+          const doctorResult = await getUserById(apt.doctorId);
+          if (doctorResult.success) {
+            apt.doctorName = doctorResult.data.fullName;
+          }
+        }
+        appointments.push(apt);
+      }
+      
+      if (isMounted.current) {
+        const categorized = {
+          pending: appointments.filter(a => a.status === 'pending'),
+          approved: appointments.filter(a => a.status === 'approved'),
+          scheduled: appointments.filter(a => a.status === 'scheduled'),
+          checkedIn: appointments.filter(a => a.status === 'checked-in'),
+          completed: appointments.filter(a => a.status === 'completed'),
+          cancelled: appointments.filter(a => a.status === 'cancelled'),
+          rejected: appointments.filter(a => a.status === 'rejected'),
+          noShow: appointments.filter(a => a.status === 'no-show'),
+          all: appointments
+        };
+        setAppointments(categorized);
+      }
+      return;
+    }
     
     const result = await getAppointmentsByDate(dateStr);
     
-    // Check if component is still mounted
     if (!isMounted.current) return;
     
     if (result.success) {
-      console.log('Raw appointments received:', result.data);
-      
-      // Make sure all appointments have proper fields
       const appointmentsWithDefaults = result.data.map(apt => ({
         ...apt,
         patientName: apt.patientName || 'Unknown Patient',
@@ -377,28 +504,16 @@ const fetchAppointments = useCallback(async () => {
         status: apt.status || 'pending',
         time: apt.time || '00:00',
         date: apt.date || dateStr,
-        isEmergency: apt.isEmergency || false
+        isEmergency: apt.isEmergency || false,
+        paymentStatus: apt.paymentStatus || 'pending',
+        paymentAmount: apt.paymentAmount || apt.consultationFee || 1000
       }));
       
-      // Log categorized counts for debugging
-      const pending = appointmentsWithDefaults.filter(a => a.status === 'pending');
-      const approved = appointmentsWithDefaults.filter(a => a.status === 'approved');
-      const scheduled = appointmentsWithDefaults.filter(a => a.status === 'scheduled');
-      const checkedIn = appointmentsWithDefaults.filter(a => a.status === 'checked-in');
-      
-      console.log('Categorized appointments:', {
-        pending: pending.length,
-        approved: approved.length,
-        scheduled: scheduled.length,
-        checkedIn: checkedIn.length,
-        total: appointmentsWithDefaults.length
-      });
-      
       const categorized = {
-        pending: pending,
-        approved: approved,
-        scheduled: scheduled,
-        checkedIn: checkedIn,
+        pending: appointmentsWithDefaults.filter(a => a.status === 'pending'),
+        approved: appointmentsWithDefaults.filter(a => a.status === 'approved'),
+        scheduled: appointmentsWithDefaults.filter(a => a.status === 'scheduled'),
+        checkedIn: appointmentsWithDefaults.filter(a => a.status === 'checked-in'),
         completed: appointmentsWithDefaults.filter(a => a.status === 'completed'),
         cancelled: appointmentsWithDefaults.filter(a => a.status === 'cancelled'),
         rejected: appointmentsWithDefaults.filter(a => a.status === 'rejected'),
@@ -411,21 +526,37 @@ const fetchAppointments = useCallback(async () => {
       setDashboardStats(prev => ({
         ...prev,
         todayAppointments: appointmentsWithDefaults.length,
-        pendingApprovals: pending.length,
-        checkedIn: checkedIn.length
+        pendingApprovals: categorized.pending.length,
+        checkedIn: categorized.checkedIn.length
       }));
-    } else {
-      console.error('Failed to fetch appointments:', result.error);
     }
   } catch (error) {
-    if (error.name === 'AbortError') {
-      console.log('Fetch aborted');
-      return;
+    if (error.name !== 'AbortError') {
+      console.error('Error fetching appointments:', error);
     }
-    console.error('Error fetching appointments:', error);
-    toast.error('Failed to load appointments');
   }
-}, [selectedDate]);
+}, [appointmentFilters.dateRange]);
+
+const loadDischarges = useCallback(async () => {
+  setLoadingDischarges(true);
+  try {
+    const { getAllDischarges } = await import('../database');
+    const result = await getAllDischarges();
+    if (result.success) {
+      setDischarges(result.data);
+    }
+  } catch (error) {
+    console.error('Error loading discharges:', error);
+  } finally {
+    setLoadingDischarges(false);
+  }
+}, []);
+
+useEffect(() => {
+  if (activeTab === 'discharge-history') {
+    loadDischarges();
+  }
+}, [activeTab, loadDischarges]);
 
 // Add cleanup in the main useEffect:
 useEffect(() => {
@@ -697,29 +828,104 @@ useEffect(() => {
 
   // ==================== APPOINTMENT HANDLER FUNCTIONS ====================
 
-  const handleApproveAppointment = async (appointmentId) => {
-    try {
-      const result = await approveAppointment(appointmentId, currentUser.uid);
+// Handle verifying appointment payment and assigning to doctor
+const handleVerifyPaymentAndConfirm = async (appointmentId) => {
+  try {
+    const { verifyAndAssignAppointment } = await import('../database');
+    const result = await verifyAndAssignAppointment(appointmentId, currentUser.uid);
+    
+    if (result.success) {
+      toast.success('Payment verified! Appointment confirmed and doctor notified.');
+      await fetchAppointments();
+      await fetchTransactionHistory(); // Also refresh transaction history
       
-      if (result.success) {
-        toast.success('Appointment approved successfully');
-        
-        // Refresh appointments
-        fetchAppointments();
-        
-        // Update dashboard stats
-        setDashboardStats(prev => ({
-          ...prev,
-          pendingApprovals: Math.max(0, prev.pendingApprovals - 1)
-        }));
-      } else {
-        toast.error(result.error || 'Failed to approve appointment');
-      }
-    } catch (error) {
-      console.error('Error approving appointment:', error);
-      toast.error('Failed to approve appointment');
+      setDashboardStats(prev => ({
+        ...prev,
+        pendingPaymentsCount: Math.max(0, (prev.pendingPaymentsCount || 0) - 1)
+      }));
+    } else {
+      toast.error(result.error || 'Failed to verify payment');
     }
+  } catch (error) {
+    console.error('Error verifying payment:', error);
+    toast.error('Failed to verify payment');
+  }
+};
+
+// Handle viewing appointment payment proof
+const handleViewPaymentProof = async (appointment) => {
+  console.log('handleViewPaymentProof called with:', appointment);
+  
+  if (!appointment) {
+    toast.error('No appointment data provided');
+    console.error('Appointment is null or undefined');
+    return;
+  }
+  
+  if (!appointment.id) {
+    toast.error('Invalid appointment: Missing ID');
+    console.error('Appointment missing ID:', appointment);
+    return;
+  }
+  
+  // Ensure we have all required fields
+  const enrichedAppointment = {
+    ...appointment,
+    id: appointment.id,
+    patientId: appointment.patientId,
+    doctorId: appointment.doctorId,
+    paymentStatus: appointment.paymentStatus,
+    paymentAmount: appointment.paymentAmount || appointment.consultationFee || 1000,
+    paymentMethod: appointment.paymentMethod,
+    paymentReference: appointment.paymentReference,
+    paymentProof: appointment.paymentProof,
+    paidAt: appointment.paidAt,
+    date: appointment.date,
+    time: appointment.time,
+    doctorName: appointment.doctorName || 'Unknown Doctor',
+    patientName: appointment.patientName || 'Unknown Patient'
   };
+  
+  console.log('Setting selected appointment for verification:', enrichedAppointment);
+  setSelectedAppointmentForPayment(enrichedAppointment);
+  setShowPaymentVerificationModal(true);
+};
+
+const handleApproveAppointment = async (appointmentId) => {
+  if (!appointmentId) {
+    toast.error('Invalid appointment ID');
+    return;
+  }
+
+  setLoading(true);
+  try {
+    const result = await approveAppointment(appointmentId, currentUser?.uid);
+    
+    console.log('Approve appointment result:', result); // Debug log
+    
+    if (result && result.success) {
+      toast.success('Appointment approved successfully');
+      
+      // Refresh appointments
+      await fetchAppointments();
+      
+      // Update dashboard stats
+      setDashboardStats(prev => ({
+        ...prev,
+        pendingApprovals: Math.max(0, (prev.pendingApprovals || 0) - 1)
+      }));
+    } else {
+      const errorMsg = result?.error || 'Failed to approve appointment';
+      toast.error(errorMsg);
+      console.error('Approval failed:', result?.error);
+    }
+  } catch (error) {
+    console.error('Error approving appointment:', error);
+    toast.error(error.message || 'Failed to approve appointment');
+  } finally {
+    setLoading(false);
+  }
+};
 
   const handleRejectAppointment = async (appointmentId) => {
     const reason = prompt('Please provide reason for rejection:');
@@ -748,26 +954,38 @@ useEffect(() => {
     }
   };
 
-  const handleCheckIn = async (appointmentId) => {
-    try {
-      const result = await checkInPatient(appointmentId, currentUser.uid);
-      
-      if (result.success) {
-        toast.success('Patient checked in successfully');
-        fetchAppointments();
-        
-        setDashboardStats(prev => ({
-          ...prev,
-          checkedIn: prev.checkedIn + 1
-        }));
-      } else {
-        toast.error(result.error || 'Failed to check in patient');
-      }
-    } catch (error) {
-      console.error('Error checking in patient:', error);
-      toast.error('Failed to check in patient');
+// In Receptionist.jsx, add or update this function:
+
+const handleCheckInPatient = async (appointmentId) => {
+  if (!appointmentId) {
+    toast.error('Invalid appointment ID');
+    return;
+  }
+
+  setLoading(true);
+  try {
+    // Use the correct checkInPatient function from database
+    const result = await checkInPatient(appointmentId, currentUser.uid);
+    
+    if (result.success) {
+      toast.success('Patient checked in successfully. Doctor has been notified.');
+      // Refresh appointments to update the UI
+      await fetchAppointments();
+      // Update dashboard stats
+      setDashboardStats(prev => ({
+        ...prev,
+        checkedIn: (prev.checkedIn || 0) + 1
+      }));
+    } else {
+      toast.error(result.error || 'Failed to check in patient');
     }
-  };
+  } catch (error) {
+    console.error('Error checking in patient:', error);
+    toast.error(error.message || 'Failed to check in patient');
+  } finally {
+    setLoading(false);
+  }
+};
 
   const handleSuggestReschedule = (appointment) => {
     setSelectedAppointment(appointment);
@@ -812,11 +1030,11 @@ useEffect(() => {
     setShowAppointmentDetails(true);
   };
 
-  const handleAppointmentSuccess = () => {
-    setShowAppointmentBooking(false);
-    fetchAppointments();
-    toast.success('Appointment booked successfully');
-  };
+const handleAppointmentSuccess = () => {
+  setShowAppointmentBooking(false);
+  fetchAppointments();
+  toast.success('Appointment booked successfully');
+};
 
   // ==================== OTHER HANDLER FUNCTIONS ====================
 
@@ -1434,6 +1652,7 @@ useEffect(() => {
   const tabs = [
     { id: 'dashboard', label: 'Dashboard', icon: faHospital },
     { id: 'appointments', label: 'Appointments', icon: faCalendarCheck },
+    { id: 'registration', label: 'Walk in registration', icon: faUser },
     { id: 'beds', label: 'Bed Management', icon: faBed },
     { id: 'payments', label: 'Payments', icon: faMoneyBillWave },
     { id: 'emergency', label: 'Emergency', icon: faAmbulance },
@@ -1645,7 +1864,7 @@ useEffect(() => {
                         </div>
                       </div>
                       <button
-                        onClick={() => handleCheckIn(apt.id)}
+                        onClick={() => handleCheckInPatient(apt.id)}
                         className="px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700"
                       >
                         Check In
@@ -1676,50 +1895,237 @@ useEffect(() => {
     </div>
   );
 
-const renderAppointments = () => (
-  <div className="space-y-6">
-    <div className="flex justify-between items-center">
-      <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Appointment Management</h2>
-      <div className="flex items-center space-x-3">
-        <DatePicker
-          selected={selectedDate}
-          onChange={(date) => setSelectedDate(date)}
-          className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 dark:bg-gray-700 dark:text-white"
-          dateFormat="MMMM d, yyyy"
-        />
-        <button
-          onClick={() => setShowAppointmentBooking(true)}
-          className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
-        >
-          <FontAwesomeIcon icon={faPlus} className="mr-2" />
-          New Appointment
-        </button>
+const renderAppointments = () => {
+  // Filter appointments based on selected filters
+  const filteredAppointments = appointments.all.filter(apt => {
+    if (appointmentFilters.doctorId !== 'all' && apt.doctorId !== appointmentFilters.doctorId) return false;
+    if (appointmentFilters.status !== 'all' && apt.status !== appointmentFilters.status) return false;
+    
+    // Date range filtering
+    const aptDate = new Date(apt.date);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const startOfWeek = new Date(today);
+    startOfWeek.setDate(today.getDate() - today.getDay());
+    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    
+    switch (appointmentFilters.dateRange) {
+      case 'today':
+        return aptDate.toDateString() === today.toDateString();
+      case 'tomorrow':
+        return aptDate.toDateString() === tomorrow.toDateString();
+      case 'week':
+        return aptDate >= startOfWeek;
+      case 'month':
+        return aptDate >= startOfMonth;
+      case 'all':
+      default:
+        return true;
+    }
+  });
+  
+  // Sort by date (ascending)
+  const sortedAppointments = [...filteredAppointments].sort((a, b) => {
+    const dateCompare = a.date.localeCompare(b.date);
+    if (dateCompare !== 0) return dateCompare;
+    return a.time.localeCompare(b.time);
+  });
+
+  // Enrich appointments with required fields
+  const enrichedAppointments = sortedAppointments.map(apt => ({
+    ...apt,
+    patientName: apt.patientName || 'Unknown Patient',
+    doctorName: apt.doctorName || 'Unknown Doctor',
+    status: apt.status || 'pending',
+    paymentStatus: apt.paymentStatus || 'pending',
+    paymentAmount: apt.paymentAmount || apt.consultationFee || 1000,
+    isEmergency: apt.isEmergency || false
+  }));
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center flex-wrap gap-3">
+        <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Appointment Management</h2>
+        <div className="flex items-center space-x-3">
+          <DatePicker
+            selected={selectedDate}
+            onChange={(date) => setSelectedDate(date)}
+            className="px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 dark:bg-gray-700 dark:text-white"
+            dateFormat="MMMM d, yyyy"
+          />
+          <button
+            onClick={() => {
+              setBookingPatientId(null);
+              setSelectedPatient(null);
+              setSearchResults([]);
+              setShowAppointmentBooking(true);
+            }}
+            className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition"
+          >
+            <FontAwesomeIcon icon={faPlus} className="mr-2" />
+            New Appointment
+          </button>
+        </div>
       </div>
-    </div>
 
-    {/* Debug info - remove in production */}
-    <div className="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg text-sm">
-      <p>Total appointments: {appointments.all.length}</p>
-      <p>Pending: {appointments.pending.length}</p>
-      <p>Approved: {appointments.approved.length}</p>
-      <p>Scheduled: {appointments.scheduled.length}</p>
-    </div>
+      {/* Filters Section */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          {/* Date Range Filter */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Date Range
+            </label>
+            <select
+              value={appointmentFilters.dateRange}
+              onChange={(e) => setAppointmentFilters(prev => ({ ...prev, dateRange: e.target.value }))}
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 dark:bg-gray-700 dark:text-white"
+            >
+              <option value="today">Today</option>
+              <option value="tomorrow">Tomorrow</option>
+              <option value="week">This Week</option>
+              <option value="month">This Month</option>
+              <option value="all">All Appointments</option>
+            </select>
+          </div>
+          
+          {/* Doctor Filter */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Filter by Doctor
+            </label>
+            <select
+              value={appointmentFilters.doctorId}
+              onChange={(e) => setAppointmentFilters(prev => ({ ...prev, doctorId: e.target.value }))}
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 dark:bg-gray-700 dark:text-white"
+            >
+              <option value="all">All Doctors</option>
+              {availableDoctorsList.map(doc => (
+                <option key={doc.id} value={doc.id}>Dr. {doc.fullName}</option>
+              ))}
+            </select>
+          </div>
+          
+          {/* Status Filter */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+              Filter by Status
+            </label>
+            <select
+              value={appointmentFilters.status}
+              onChange={(e) => setAppointmentFilters(prev => ({ ...prev, status: e.target.value }))}
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 dark:bg-gray-700 dark:text-white"
+            >
+              <option value="all">All Status</option>
+              <option value="pending">Pending Approval</option>
+              <option value="approved">Approved (Awaiting Payment)</option>
+              <option value="paid">Paid (Awaiting Verification)</option>
+              <option value="confirmed">Confirmed</option>
+              <option value="checked-in">Checked In</option>
+              <option value="completed">Completed</option>
+              <option value="cancelled">Cancelled</option>
+              <option value="rejected">Rejected</option>
+            </select>
+          </div>
+          
+          {/* Reset Filters Button */}
+          <div className="flex items-end">
+            <button
+              onClick={() => setAppointmentFilters({ doctorId: 'all', status: 'all', dateRange: 'today' })}
+              className="w-full px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition"
+            >
+              Reset Filters
+            </button>
+          </div>
+        </div>
+      </div>
 
-    {/* Appointment List Component */}
-    <AppointmentList
-      appointments={appointments.all}
-      role="receptionist"
-      title={`Appointments for ${selectedDate.toLocaleDateString()}`}
-      onApprove={handleApproveAppointment}
-      onReject={handleRejectAppointment}
-      onCheckIn={handleCheckIn}
-      onCancel={handleSuggestReschedule}
-      onViewDetails={handleViewAppointmentDetails}
-      loading={loading}
-      showFilters={true}
-    />
+      {/* Summary Statistics */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <div className="bg-yellow-50 dark:bg-yellow-900 rounded-lg p-3 text-center">
+          <p className="text-xs text-yellow-600 dark:text-yellow-400">Pending Approval</p>
+          <p className="text-xl font-bold text-yellow-700 dark:text-yellow-300">
+            {enrichedAppointments.filter(a => a.status === 'pending').length}
+          </p>
+        </div>
+        <div className="bg-blue-50 dark:bg-blue-900 rounded-lg p-3 text-center">
+          <p className="text-xs text-blue-600 dark:text-blue-400">Approved (Pay)</p>
+          <p className="text-xl font-bold text-blue-700 dark:text-blue-300">
+            {enrichedAppointments.filter(a => a.status === 'approved' && a.paymentStatus !== 'paid').length}
+          </p>
+        </div>
+        <div className="bg-green-50 dark:bg-green-900 rounded-lg p-3 text-center">
+          <p className="text-xs text-green-600 dark:text-green-400">Paid (Verify)</p>
+          <p className="text-xl font-bold text-green-700 dark:text-green-300">
+            {enrichedAppointments.filter(a => a.paymentStatus === 'paid' && a.status === 'approved').length}
+          </p>
+        </div>
+        <div className="bg-purple-50 dark:bg-purple-900 rounded-lg p-3 text-center">
+          <p className="text-xs text-purple-600 dark:text-purple-400">Confirmed</p>
+          <p className="text-xl font-bold text-purple-700 dark:text-purple-300">
+            {enrichedAppointments.filter(a => a.status === 'confirmed').length}
+          </p>
+        </div>
+        <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-3 text-center">
+          <p className="text-xs text-gray-600 dark:text-gray-400">Checked In</p>
+          <p className="text-xl font-bold text-gray-700 dark:text-gray-300">
+            {enrichedAppointments.filter(a => a.status === 'checked-in').length}
+          </p>
+        </div>
+      </div>
+
+      {/* Appointment List Component */}
+      <AppointmentList
+        appointments={enrichedAppointments}
+        role="receptionist"
+        title={`Appointments (${enrichedAppointments.length} found)`}
+        onApprove={handleApproveAppointment}
+        onReject={handleRejectAppointment}
+        onCancel={handleSuggestReschedule}
+        onCheckIn={(appointmentId) => {
+    // Find the appointment to check its current status
+    const appointment = enrichedAppointments.find(a => a.id === appointmentId);
+    if (appointment?.paymentStatus === 'paid' && appointment?.status === 'approved') {
+      // Payment verified - confirm appointment
+      handleVerifyPaymentAndConfirm(appointmentId);
+    } else if (appointment?.status === 'confirmed') {
+      // Already confirmed - check in patient
+      handleCheckInPatient(appointmentId);
+    } else {
+      toast.error('Cannot check in: Appointment not ready');
+    }
+  }}
+        onViewDetails={handleViewAppointmentDetails}
+        loading={loading}
+        showFilters={true}
+      />
+    </div>
+  );
+};
+
+const renderRegistration = () => (
+  <div className="space-y-6">
+    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+      <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">Walk-in Registration</h2>
+      <p className="text-gray-600 dark:text-gray-400 mb-6">
+        Register a new walk-in patient and book an appointment.
+      </p>
+      <button
+        onClick={() => {
+          resetWalkInForm();
+          setShowWalkInModal(true);
+        }}
+        className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition flex items-center"
+      >
+        <FontAwesomeIcon icon={faUserPlus} className="mr-2" />
+        Register New Patient
+      </button>
+    </div>
   </div>
 );
+
   const renderBeds = () => (
     <div className="space-y-6">
       <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Bed Management</h2>
@@ -1737,37 +2143,253 @@ const renderAppointments = () => (
     </div>
   );
 
-  const renderPayments = () => (
-    <div className="space-y-6">
-      <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Payment Management</h2>
-
-      <div className="grid grid-cols-1 gap-4">
-        {pendingPayments.length === 0 ? (
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center">
-            <FontAwesomeIcon icon={faMoneyBillWave} className="h-16 w-16 text-gray-400 mb-4" />
-            <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">No Pending Payments</h3>
-            <p className="text-gray-600 dark:text-gray-400">All payments have been processed</p>
-          </div>
-        ) : (
-          pendingPayments.map((invoice) => (
-            <Invoice
-              key={invoice.id}
-              invoice={invoice}
-              onPaymentConfirm={() => {
-                setSelectedItem(invoice);
-                setPaymentData(prev => ({ ...prev, amount: invoice.total }));
-                setShowPaymentModal(true);
-              }}
-              onViewDetails={() => {
-                setSelectedInvoice(invoice);
-                setShowInvoiceModal(true);
-              }}
-            />
-          ))
-        )}
+const renderPayments = () => (
+  <div className="space-y-6">
+    <div className="flex justify-between items-center flex-wrap gap-3">
+      <div>
+        <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Payment Management</h2>
+        <p className="text-sm text-gray-500 mt-1">
+          Total Revenue: {formatCurrency(transactionHistory.reduce((sum, t) => sum + (t.paymentAmount || t.consultationFee || 0), 0))}
+        </p>
       </div>
+      <button
+        onClick={() => setShowTransactionHistory(!showTransactionHistory)}
+        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition flex items-center"
+      >
+        <FontAwesomeIcon icon={faEye} className="mr-2" />
+        {showTransactionHistory ? 'Hide History' : 'View Transaction History'}
+      </button>
     </div>
+
+    {showTransactionHistory ? (
+      <TransactionHistory 
+        transactions={transactionHistory}
+        onRefresh={() => {
+          fetchTransactionHistory();
+          toast.success('Transaction history refreshed');
+        }}
+      />
+    ) : (
+      <>
+        {/* Pending Verifications Section */}
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
+          <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center">
+              <FontAwesomeIcon icon={faMoneyBillWave} className="mr-2 text-yellow-500" />
+              Pending Payment Verifications
+              <span className="ml-2 px-2 py-1 bg-yellow-100 text-yellow-800 rounded-full text-xs">
+                {appointments.all.filter(a => a.paymentStatus === 'paid' && a.status === 'approved').length}
+              </span>
+            </h3>
+          </div>
+          <div className="p-6">
+            {appointments.all.filter(a => a.paymentStatus === 'paid' && a.status === 'approved').length === 0 ? (
+              <div className="text-center py-8">
+                <FontAwesomeIcon icon={faCheckCircle} className="h-12 w-12 text-green-400 mb-3" />
+                <p className="text-gray-600 dark:text-gray-400">No pending payment verifications</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {appointments.all
+                  .filter(a => a.paymentStatus === 'paid' && a.status === 'approved')
+                  .map((apt) => (
+                    <div key={apt.id} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:shadow-md transition">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <div className="flex items-center mb-2">
+                            <span className="font-medium text-gray-900 dark:text-white">Dr. {apt.doctorName}</span>
+                            <span className="ml-2 text-xs text-gray-500">•</span>
+                            <span className="ml-2 text-sm text-gray-600 dark:text-gray-400">{apt.date} at {apt.time}</span>
+                          </div>
+                          <p className="text-sm text-gray-600 dark:text-gray-400">Patient: {apt.patientName}</p>
+                          <p className="text-sm text-gray-600 dark:text-gray-400">Challan: APT-{apt.id.slice(-8)}</p>
+                          <p className="text-sm font-semibold text-green-600 mt-1">
+                            Amount: {formatCurrency(apt.paymentAmount || apt.consultationFee || 1000)}
+                          </p>
+                          {apt.paymentMethod && (
+                            <p className="text-xs text-gray-500 mt-1">Method: {apt.paymentMethod.toUpperCase()}</p>
+                          )}
+                          {apt.paymentReference && (
+                            <p className="text-xs text-gray-500">Transaction: {apt.paymentReference}</p>
+                          )}
+                        </div>
+                        <div className="flex space-x-2">
+<button
+  onClick={() => {
+    console.log('Verify Payment button clicked for apt:', apt);
+    console.log('Appointment ID:', apt.id);
+    console.log('Payment Status:', apt.paymentStatus);
+    
+    if (!apt || !apt.id) {
+      toast.error('Invalid appointment data');
+      return;
+    }
+    
+    // Make sure we have the full appointment data
+    const appointmentToVerify = {
+      ...apt,
+      id: apt.id,
+      patientId: apt.patientId,
+      doctorId: apt.doctorId,
+      paymentStatus: apt.paymentStatus,
+      paymentAmount: apt.paymentAmount || apt.consultationFee || 1000,
+      paymentMethod: apt.paymentMethod,
+      paymentReference: apt.paymentReference,
+      paymentProof: apt.paymentProof,
+      paidAt: apt.paidAt,
+      date: apt.date,
+      time: apt.time,
+      doctorName: apt.doctorName,
+      patientName: apt.patientName
+    };
+    
+    setSelectedAppointmentForPayment(appointmentToVerify);
+    setShowPaymentVerificationModal(true);
+  }}
+  className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm flex items-center"
+>
+  <FontAwesomeIcon icon={faCheck} className="mr-1" />
+  Verify Payment
+</button>
+                          <button
+                            onClick={() => {
+                              setSelectedAppointmentForPayment(apt);
+                              setShowPaymentVerificationModal(true);
+                            }}
+                            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm flex items-center"
+                          >
+                            <FontAwesomeIcon icon={faEye} className="mr-1" />
+                            View Proof
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Recent Payments Section */}
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
+          <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Recent Payments</h3>
+          </div>
+          <div className="p-6">
+            {transactionHistory.slice(0, 10).length === 0 ? (
+              <div className="text-center py-8">
+                <FontAwesomeIcon icon={faMoneyBillWave} className="h-12 w-12 text-gray-400 mb-3" />
+                <p className="text-gray-600 dark:text-gray-400">No payment records found</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                  <thead className="bg-gray-50 dark:bg-gray-900">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Challan No</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Patient</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Doctor</th>
+                      <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Amount</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Method</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Transaction ID</th>
+                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                    {transactionHistory.slice(0, 10).map((tx) => (
+                      <tr key={tx.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                        <td className="px-4 py-3 text-sm text-gray-900 dark:text-white">
+                          {tx.transactionDate ? formatDate(tx.transactionDate) : 'N/A'}
+                        </td>
+                        <td className="px-4 py-3 text-sm font-mono text-gray-900 dark:text-white">
+                          {tx.challanNo}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-900 dark:text-white">
+                          {tx.patientName}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-gray-900 dark:text-white">
+                          Dr. {tx.doctorName}
+                        </td>
+                        <td className="px-4 py-3 text-right text-sm font-medium text-green-600">
+                          {formatCurrency(tx.paymentAmount || tx.consultationFee || 1000)}
+                        </td>
+                        <td className="px-4 py-3 text-sm capitalize text-gray-900 dark:text-white">
+                          {tx.paymentMethod || 'cash'}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`px-2 py-1 rounded-full text-xs ${
+                            tx.status === 'confirmed' ? 'bg-green-100 text-green-800' : 
+                            tx.paymentStatus === 'paid' ? 'bg-yellow-100 text-yellow-800' :
+                            'bg-blue-100 text-blue-800'
+                          }`}>
+                            {tx.status || tx.paymentStatus || 'pending'}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-sm font-mono text-gray-500">
+                          {tx.paymentReference || 'N/A'}
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          <button
+                            onClick={() => {
+                              setSelectedAppointmentForPayment(tx);
+                              setShowPaymentVerificationModal(true);
+                            }}
+                            className="text-blue-600 hover:text-blue-700"
+                            title="View Details"
+                          >
+                            <FontAwesomeIcon icon={faEye} />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {transactionHistory.length > 10 && (
+                  <div className="text-center pt-4">
+                    <button
+                      onClick={() => setShowTransactionHistory(true)}
+                      className="text-blue-600 hover:text-blue-700 text-sm"
+                    >
+                      View all {transactionHistory.length} transactions →
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </>
+    )}
+  </div>
+);
+
+// Payment Verification Modal - Using the enhanced component
+const renderPaymentVerificationModal = () => {
+  if (!showPaymentVerificationModal || !selectedAppointmentForPayment) return null;
+
+  return (
+    <PaymentVerificationModal
+      appointment={selectedAppointmentForPayment}
+      receptionistId={currentUser?.uid}  // Make sure this is the correct variable name
+      onClose={() => {
+        setShowPaymentVerificationModal(false);
+        setSelectedAppointmentForPayment(null);
+      }}
+      onVerified={(appointmentId) => {
+        fetchAppointments();
+        fetchTransactionHistory();
+        toast.success('Payment verified and appointment confirmed');
+      }}
+      onRejected={(appointmentId) => {
+        fetchAppointments();
+        fetchTransactionHistory();
+        toast.info('Payment rejected. Patient notified.');
+      }}
+    />
   );
+};
 
   const renderEmergency = () => (
     <div className="space-y-6">
@@ -3442,6 +4064,7 @@ const renderAppointments = () => (
           <>
             {activeTab === 'dashboard' && renderDashboard()}
             {activeTab === 'appointments' && renderAppointments()}
+            {activeTab === 'registration' && renderRegistration()}
             {activeTab === 'beds' && renderBeds()}
             {activeTab === 'payments' && renderPayments()}
             {activeTab === 'emergency' && renderEmergency()}
@@ -3511,26 +4134,102 @@ const renderAppointments = () => (
       {showEmergencyModal && renderEmergencyModal()}
       {showPatientHistoryModal && renderPatientHistoryModal()}
       {showRescheduleModal && renderRescheduleModal()}
-      {showAppointmentBooking && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 overflow-y-auto">
-          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-4xl w-full my-8">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-xl font-semibold text-gray-900 dark:text-white">Book New Appointment</h3>
-              <button
-                onClick={() => setShowAppointmentBooking(false)}
-                className="text-gray-500 hover:text-gray-700"
-              >
-                <FontAwesomeIcon icon={faTimes} size="lg" />
-              </button>
-            </div>
-            <AppointmentBooking
-              patientId={currentUser?.uid}
-              onSuccess={handleAppointmentSuccess}
-              onCancel={() => setShowAppointmentBooking(false)}
+{showAppointmentBooking && (
+  <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4 overflow-y-auto">
+    <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-4xl w-full my-8">
+      <div className="flex justify-between items-center mb-4">
+        <h3 className="text-xl font-semibold text-gray-900 dark:text-white">
+          {bookingPatientId ? 'Book Appointment' : 'Select Patient First'}
+        </h3>
+        <button
+          onClick={() => {
+            setShowAppointmentBooking(false);
+            setBookingPatientId(null);
+          }}
+          className="text-gray-500 hover:text-gray-700"
+        >
+          <FontAwesomeIcon icon={faTimes} size="lg" />
+        </button>
+      </div>
+
+      {/* Patient Selection Step */}
+      {!bookingPatientId ? (
+        <div className="space-y-4">
+          <p className="text-gray-600 dark:text-gray-400 mb-4">
+            Please select a patient to book an appointment for:
+          </p>
+          
+          <div className="mb-4">
+            <SearchBar
+              onSearch={handleSearchPatient}
+              placeholder="Search patient by name, phone, or CNIC..."
             />
           </div>
+          
+          {searchResults.length > 0 && (
+            <div className="space-y-2 max-h-96 overflow-y-auto">
+              {searchResults.map(patient => (
+                <button
+                  key={patient.id}
+                  onClick={() => {
+                    setBookingPatientId(patient.id);
+                    setSelectedPatient(patient);
+                    setSearchResults([]);
+                  }}
+                  className="w-full text-left p-4 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-700 transition"
+                >
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <p className="font-medium text-gray-900 dark:text-white">{patient.fullName}</p>
+                      <p className="text-sm text-gray-500">{patient.phone}</p>
+                      {patient.cnic && <p className="text-xs text-gray-400">CNIC: {patient.cnic}</p>}
+                    </div>
+                    <button className="px-3 py-1 bg-purple-600 text-white rounded-lg text-sm">
+                      Select
+                    </button>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+          
+          {searchResults.length === 0 && (
+            <div className="text-center py-8">
+              <p className="text-gray-500">Search for a patient to book appointment</p>
+              <button
+                onClick={() => {
+                  setShowAppointmentBooking(false);
+                  resetWalkInForm();
+                  setShowWalkInModal(true);
+                }}
+                className="mt-4 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+              >
+                Register New Patient
+              </button>
+            </div>
+          )}
         </div>
+      ) : (
+        <AppointmentBooking
+          patientId={bookingPatientId}
+          onSuccess={() => {
+            setShowAppointmentBooking(false);
+            setBookingPatientId(null);
+            setSelectedPatient(null);
+            fetchAppointments();
+            toast.success('Appointment booked successfully');
+          }}
+          onCancel={() => {
+            setShowAppointmentBooking(false);
+            setBookingPatientId(null);
+            setSelectedPatient(null);
+          }}
+        />
       )}
+    </div>
+  </div>
+)}
+      {showPaymentVerificationModal && renderPaymentVerificationModal()}
       {showAppointmentDetails && selectedAppointment && (
         <AppointmentDetails
           appointment={selectedAppointment}

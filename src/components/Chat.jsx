@@ -67,6 +67,7 @@ const Chat = ({
   userRole, 
   otherUserId, 
   otherUserName, 
+  otherUserProfileImage,
   otherUserRole = 'patient',
   onClose,
   onMessageSent,
@@ -452,11 +453,12 @@ const handleSendMessage = useCallback(async () => {
       }
     }
 
-    // Create optimistic message with unique temp ID
-    const tempId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    // Create a MORE UNIQUE optimistic message ID
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).substring(2, 15)}-${performance.now()}-${crypto.randomUUID?.() || Math.random()}`;
+    
     const optimisticMessage = {
-      id: tempId, // Use temp ID temporarily
-      tempId: tempId, // Store temp ID for reference
+      id: tempId, // Use temp ID as the key
+      tempId: tempId,
       chatId,
       senderId: currentUser.uid,
       recipientId: otherUserId,
@@ -481,7 +483,14 @@ const handleSendMessage = useCallback(async () => {
       } : null
     };
 
-    setMessages(prev => [...prev, optimisticMessage]);
+    // Add optimistic message
+    setMessages(prev => {
+      // Check if we already have this temp message (avoid duplicates)
+      const exists = prev.some(msg => msg.id === tempId || msg.tempId === tempId);
+      if (exists) return prev;
+      return [...prev, optimisticMessage];
+    });
+    
     setNewMessage('');
     setAttachment(null);
     setAttachmentPreview(null);
@@ -496,6 +505,7 @@ const handleSendMessage = useCallback(async () => {
       file: processedFile,
       status: 'sent',
       timestamp: new Date(),
+      tempId: tempId, // Include tempId in the message data
       replyTo: replyingTo ? {
         id: replyingTo.id,
         text: replyingTo.text,
@@ -506,10 +516,12 @@ const handleSendMessage = useCallback(async () => {
     const result = await sendMessage(chatId, messageData);
 
     if (result.success && isMounted.current) {
-      // Replace optimistic message with real one using the temp ID
+      // Replace optimistic message with real one
       setMessages(prev => 
         prev.map(msg => 
-          msg.id === tempId ? { ...result.data, optimistic: false } : msg
+          (msg.id === tempId || msg.tempId === tempId) 
+            ? { ...result.data, optimistic: false } 
+            : msg
         )
       );
 
@@ -527,7 +539,9 @@ const handleSendMessage = useCallback(async () => {
       // Mark optimistic message as failed
       setMessages(prev => 
         prev.map(msg => 
-          msg.id === tempId ? { ...msg, status: 'failed', error: result.error } : msg
+          (msg.id === tempId || msg.tempId === tempId) 
+            ? { ...msg, status: 'failed', error: result.error } 
+            : msg
         )
       );
       toast.error(result.error || 'Failed to send message');
@@ -817,37 +831,55 @@ const handleNewMessages = useCallback(async (newMessages) => {
   if (!isMounted.current || !chatId || !currentUser) return;
 
   setMessages(prevMessages => {
+    // Create a map with better duplicate detection
     const messageMap = new Map();
     
-    // Add existing messages first (preserve optimistic messages)
+    // Add all existing messages first
     prevMessages.forEach(msg => {
-      // Don't replace optimistic messages with server ones yet if they're still sending
-      if (msg.optimistic && msg.status === 'sending') {
-        messageMap.set(msg.id, msg);
-      } else {
-        messageMap.set(msg.id, msg);
-      }
+      // Store all messages, but track optimistic ones separately
+      messageMap.set(msg.id, msg);
     });
     
-    // Add or update new messages from server
-    newMessages.forEach(msg => {
-      // Check if this is a real message (not optimistic)
-      if (!msg.optimistic) {
-        // If we have an optimistic version with temp ID, replace it
-        const existingOptimistic = Array.from(messageMap.values()).find(
-          m => m.optimistic && m.tempId === msg.tempId
-        );
-        
-        if (existingOptimistic) {
-          messageMap.delete(existingOptimistic.id);
+    // Process new messages from server
+    newMessages.forEach(newMsg => {
+      // Check if this new message corresponds to an optimistic message
+      // by comparing temporary IDs or content
+      const matchingOptimistic = Array.from(messageMap.values()).find(prevMsg => {
+        if (prevMsg.optimistic && prevMsg.status === 'sending') {
+          // Match by temporary ID if available, or by content and timestamp proximity
+          if (prevMsg.tempId && newMsg.tempId) {
+            return prevMsg.tempId === newMsg.tempId;
+          }
+          // Fallback: match by sender, recipient, text content (within last 10 seconds)
+          if (prevMsg.senderId === newMsg.senderId && 
+              prevMsg.recipientId === newMsg.recipientId &&
+              prevMsg.text === newMsg.text) {
+            const prevTime = prevMsg.timestamp?.toDate ? prevMsg.timestamp.toDate() : new Date(prevMsg.timestamp);
+            const newTime = newMsg.timestamp?.toDate ? newMsg.timestamp.toDate() : new Date(newMsg.timestamp);
+            const timeDiff = Math.abs(prevTime - newTime);
+            return timeDiff < 10000; // Within 10 seconds
+          }
         }
-        
-        // Always use the server message ID
-        messageMap.set(msg.id, msg);
+        return false;
+      });
+      
+      if (matchingOptimistic) {
+        // Replace the optimistic message with the real server message
+        messageMap.delete(matchingOptimistic.id);
+        messageMap.set(newMsg.id, { ...newMsg, optimistic: false });
+      } else if (!messageMap.has(newMsg.id)) {
+        // Add new message if not already present
+        messageMap.set(newMsg.id, newMsg);
       }
     });
     
-    return Array.from(messageMap.values());
+    // Convert map back to array and sort by timestamp
+    const result = Array.from(messageMap.values());
+    return result.sort((a, b) => {
+      const dateA = a.timestamp?.toDate ? a.timestamp.toDate() : new Date(a.timestamp);
+      const dateB = b.timestamp?.toDate ? b.timestamp.toDate() : new Date(b.timestamp);
+      return dateA - dateB;
+    });
   });
 
   // Mark unread messages as read
@@ -864,7 +896,7 @@ const handleNewMessages = useCallback(async (newMessages) => {
     }
   }
 
-  // Auto-scroll to bottom if near bottom
+  // Scroll to bottom if near bottom
   if (chatContainerRef.current) {
     const { scrollTop, scrollHeight, clientHeight } = chatContainerRef.current;
     const isNearBottom = scrollHeight - scrollTop - clientHeight < 150;
@@ -919,6 +951,38 @@ const handleNewMessages = useCallback(async (newMessages) => {
   }, [chatId, handleNewMessages, retryCount]);
 
   // ==================== INITIALIZATION EFFECT ====================
+
+  // Add this useEffect to clean up duplicate messages
+useEffect(() => {
+  if (messages.length === 0) return;
+  
+  // Check for duplicate messages (by ID)
+  const seenIds = new Set();
+  const duplicates = [];
+  
+  messages.forEach((msg, index) => {
+    if (seenIds.has(msg.id)) {
+      duplicates.push({ id: msg.id, index });
+    } else {
+      seenIds.add(msg.id);
+    }
+  });
+  
+  // Remove duplicates if found
+  if (duplicates.length > 0) {
+    console.warn(`Found ${duplicates.length} duplicate message IDs, cleaning up...`);
+    setMessages(prev => {
+      const uniqueMap = new Map();
+      prev.forEach(msg => {
+        // Keep the first occurrence (which is likely the real message, not optimistic)
+        if (!uniqueMap.has(msg.id) || (!msg.optimistic && uniqueMap.get(msg.id)?.optimistic)) {
+          uniqueMap.set(msg.id, msg);
+        }
+      });
+      return Array.from(uniqueMap.values());
+    });
+  }
+}, [messages]);
 
   useEffect(() => {
     initializeChat();
@@ -1154,12 +1218,12 @@ const handleNewMessages = useCallback(async (newMessages) => {
 
     return (
       <div
-        key={message.id}
-        ref={el => messageRefs.current[message.id] = el}
-        data-message-id={message.id}
-        className={`flex ${isOwn ? 'justify-end' : 'justify-start'} mb-4 group relative transition-all ${
-          searchTerm && message.text?.toLowerCase().includes(searchTerm.toLowerCase()) ? 'search-match' : ''
-        }`}
+key={`${message.id}-${message.timestamp?.toDate?.()?.getTime() || message.timestamp}-${message.optimistic ? 'opt' : 'real'}`}
+    ref={el => messageRefs.current[message.id] = el}
+    data-message-id={message.id}
+    className={`flex ${isOwn ? 'justify-end' : 'justify-start'} mb-4 group relative transition-all ${
+      searchTerm && message.text?.toLowerCase().includes(searchTerm.toLowerCase()) ? 'search-match' : ''
+    }`}
         onContextMenu={(e) => {
           e.preventDefault();
           setSelectedMessage(message);
@@ -1199,23 +1263,26 @@ const handleNewMessages = useCallback(async (newMessages) => {
 
           {/* Message header for non-own messages */}
           {!isOwn && (
-            <div className="flex items-center mb-1 text-xs text-gray-500">
-              <span className="font-medium text-gray-700 dark:text-gray-300 mr-2">
-                {otherUserName}
-              </span>
-              {otherUserRole === 'doctor' && (
-                <span className="px-1.5 py-0.5 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded-full text-[10px]">
-                  Doctor
-                </span>
-              )}
-              {isAutoReply && (
-                <span className="ml-2 px-1.5 py-0.5 bg-gray-600 text-white rounded-full text-[10px] flex items-center">
-                  <FontAwesomeIcon icon={faRobot} className="mr-1 text-xs" />
-                  Auto
-                </span>
-              )}
-            </div>
-          )}
+  <div className="flex-shrink-0 mr-3 mt-1">
+    <div className="relative">
+      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-400 to-purple-400 flex items-center justify-center text-white text-sm font-bold overflow-hidden">
+        {otherUserProfileImage ? (
+          <img 
+            src={otherUserProfileImage} 
+            alt={otherUserName} 
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          otherUserName?.charAt(0) || 'U'
+        )}
+      </div>
+      <span className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-white ${
+        onlineStatus === 'online' ? 'bg-green-500' : 
+        onlineStatus === 'away' ? 'bg-yellow-500' : 'bg-gray-400'
+      }`} />
+    </div>
+  </div>
+)}
 
           {/* Message bubble */}
           <div
@@ -1491,7 +1558,7 @@ const handleNewMessages = useCallback(async (newMessages) => {
         </div>
       </div>
     );
-  }, [currentUser, pinnedMessages, otherUserName, otherUserRole, onlineStatus, searchTerm, showReactionPicker, REACTIONS, getFileIcon, getMessageStatusIcon, handleViewFile, handleDownloadFile, handleAddReaction, handleRetryMessage]);
+  }, [currentUser?.uid, pinnedMessages, searchTerm, otherUserName, onlineStatus, otherUserProfileImage, getFileIcon, getMessageStatusIcon, showReactionPicker, REACTIONS, handleViewFile, handleDownloadFile, handleAddReaction, handleRetryMessage]);
 
   // ==================== MESSAGE OPTIONS MODAL ====================
 
@@ -1730,15 +1797,23 @@ const handleNewMessages = useCallback(async (newMessages) => {
           <div className="space-y-6">
             {/* User info */}
             <div className="flex items-center space-x-4 p-4 bg-gradient-to-r from-blue-50 to-purple-50 dark:from-blue-900/30 dark:to-purple-900/30 rounded-xl">
-              <div className="relative">
-                <div className="w-16 h-16 rounded-full bg-gradient-to-br from-blue-400 to-purple-400 flex items-center justify-center text-white text-2xl font-bold">
-                  {otherUserName?.charAt(0) || 'U'}
-                </div>
-                <span className={`absolute bottom-0 right-0 h-4 w-4 rounded-full border-2 border-white ${
-                  onlineStatus === 'online' ? 'bg-green-500' : 
-                  onlineStatus === 'away' ? 'bg-yellow-500' : 'bg-gray-400'
-                }`} />
-              </div>
+  <div className="relative">
+    <div className="w-16 h-16 rounded-full bg-gradient-to-br from-blue-400 to-purple-400 flex items-center justify-center text-white text-2xl font-bold overflow-hidden">
+      {otherUserProfileImage ? (
+        <img 
+          src={otherUserProfileImage} 
+          alt={otherUserName} 
+          className="w-full h-full object-cover"
+        />
+      ) : (
+        otherUserName?.charAt(0) || 'U'
+      )}
+    </div>
+    <span className={`absolute bottom-0 right-0 h-4 w-4 rounded-full border-2 border-white ${
+      onlineStatus === 'online' ? 'bg-green-500' : 
+      onlineStatus === 'away' ? 'bg-yellow-500' : 'bg-gray-400'
+    }`} />
+  </div>
               <div>
                 <p className="text-xl font-bold text-gray-900 dark:text-white">{otherUserName}</p>
                 <div className="flex items-center mt-1 space-x-2">
@@ -2091,20 +2166,28 @@ const handleNewMessages = useCallback(async (newMessages) => {
         {/* Header */}
         <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-t-xl">
           <div className="flex items-center space-x-3">
-            <div className="relative">
-              <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center text-white font-bold text-lg">
-                {otherUserName?.charAt(0) || 'U'}
-              </div>
-              <span className={`absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white ${
-                onlineStatus === 'online' ? 'bg-green-400' : 
-                onlineStatus === 'away' ? 'bg-yellow-400' : 'bg-gray-400'
-              }`} />
-              {unreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center animate-pulse">
-                  {unreadCount}
-                </span>
-              )}
-            </div>
+  <div className="relative">
+    <div className="w-10 h-10 rounded-full bg-white/20 flex items-center justify-center text-white font-bold text-lg overflow-hidden">
+      {otherUserProfileImage ? (
+        <img 
+          src={otherUserProfileImage} 
+          alt={otherUserName} 
+          className="w-full h-full object-cover"
+        />
+      ) : (
+        otherUserName?.charAt(0) || 'U'
+      )}
+    </div>
+    <span className={`absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white ${
+      onlineStatus === 'online' ? 'bg-green-400' : 
+      onlineStatus === 'away' ? 'bg-yellow-400' : 'bg-gray-400'
+    }`} />
+    {unreadCount > 0 && (
+      <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center animate-pulse">
+        {unreadCount}
+      </span>
+    )}
+  </div>
             <div>
               <h3 className="text-lg font-semibold flex items-center">
                 {otherUserName}

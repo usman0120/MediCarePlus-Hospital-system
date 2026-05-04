@@ -67,27 +67,93 @@ const DoctorProfile = () => {
   }, [doctor]);
 
   const fetchDoctor = async () => {
-    try {
-      setLoading(true);
-      const result = await getPublicDoctorById(id);
-      if (result.success) {
-        setDoctor(result.data);
-        
-        // Check if doctor is saved by current user (if authenticated)
-        if (isAuthenticated && userDetails) {
-          // You would check saved doctors list here
-          // setIsSaved(userDetails.savedDoctors?.includes(id));
-        }
-      } else {
-        toast.error('Doctor not found');
+  try {
+    setLoading(true);
+    const result = await getPublicDoctorById(id);
+    if (result.success) {
+      setDoctor(result.data);
+      
+      // Fetch real reviews from database
+      await fetchRealReviews(id);
+      
+      // Fetch similar doctors based on specialization
+      await fetchRealSimilarDoctors(result.data.specialization);
+      
+      // Check if doctor is saved by current user (if authenticated)
+      if (isAuthenticated && userDetails) {
+        // You would check saved doctors list here
+        // setIsSaved(userDetails.savedDoctors?.includes(id));
       }
-    } catch (error) {
-      console.error('Error fetching doctor:', error);
-      toast.error('Failed to load doctor details');
-    } finally {
-      setLoading(false);
+    } else {
+      toast.error('Doctor not found');
     }
-  };
+  } catch (error) {
+    console.error('Error fetching doctor:', error);
+    toast.error('Failed to load doctor details');
+  } finally {
+    setLoading(false);
+  }
+};
+
+const fetchRealReviews = async (doctorId) => {
+  try {
+    setLoadingReviews(true);
+    // Import getDoctorRatingsWithPatients from database for patient names
+    const { getDoctorRatingsWithPatients } = await import('../database');
+    const result = await getDoctorRatingsWithPatients(doctorId);
+    
+    if (result.success && result.data.length > 0) {
+      // Transform ratings to review format with patient names
+      const formattedReviews = result.data.map(rating => ({
+        id: rating.id,
+        patientName: rating.patientName || rating.patient?.fullName || 'Anonymous Patient',
+        rating: rating.rating || 5,
+        comment: rating.comment || rating.feedback || 'No comment provided',
+        date: rating.createdAt || new Date(),
+        avatar: rating.patientPhoto || rating.patient?.profileImage || null
+      }));
+      setReviews(formattedReviews);
+    } else {
+      // Set empty array if no reviews
+      setReviews([]);
+    }
+  } catch (error) {
+    console.error('Error fetching reviews:', error);
+    // Set empty reviews on error
+    setReviews([]);
+  } finally {
+    setLoadingReviews(false);
+  }
+};
+
+const fetchRealSimilarDoctors = async (specialization) => {
+  try {
+    // Import getUsersByRole from database
+    const { getUsersByRole } = await import('../database');
+    const result = await getUsersByRole('doctor');
+    
+    if (result.success) {
+      const similar = result.data
+        .filter(doc => 
+          doc.id !== id && 
+          doc.specialization === specialization &&
+          doc.accountStatus === 'active'
+        )
+        .slice(0, 3)
+        .map(doc => ({
+          id: doc.id,
+          name: doc.fullName || 'Unknown',
+          specialization: doc.specialization || specialization,
+          experience: doc.experience || 0,
+          rating: doc.avgRating || 0,
+          image: doc.profileImage || null
+        }));
+      setSimilarDoctors(similar);
+    }
+  } catch (error) {
+    console.error('Error fetching similar doctors:', error);
+  }
+};
 
   const fetchTimeSlots = async () => {
     try {
@@ -232,28 +298,28 @@ const DoctorProfile = () => {
   };
 
   const renderRating = (rating) => {
-    const stars = [];
-    const fullStars = Math.floor(rating);
-    const hasHalfStar = rating % 1 >= 0.5;
+  const stars = [];
+  const fullStars = Math.floor(rating);
+  const hasHalfStar = rating % 1 >= 0.5;
 
-    for (let i = 0; i < fullStars; i++) {
-      stars.push(<FontAwesomeIcon key={`full-${i}`} icon={faStar} className="text-yellow-400" />);
-    }
-    if (hasHalfStar) {
-      stars.push(<FontAwesomeIcon key="half" icon={faStarHalfAlt} className="text-yellow-400" />);
-    }
-    const remaining = 5 - stars.length;
-    for (let i = 0; i < remaining; i++) {
-      stars.push(<FontAwesomeIcon key={`empty-${i}`} icon={faStar} className="text-gray-300 dark:text-gray-600" />);
-    }
-    return stars;
-  };
+  for (let i = 0; i < fullStars; i++) {
+    stars.push(<FontAwesomeIcon key={`full-${i}`} icon={faStar} className="text-yellow-400" />);
+  }
+  if (hasHalfStar) {
+    stars.push(<FontAwesomeIcon key="half" icon={faStarHalfAlt} className="text-yellow-400" />);
+  }
+  const remaining = 5 - stars.length;
+  for (let i = 0; i < remaining; i++) {
+    stars.push(<FontAwesomeIcon key={`empty-${i}`} icon={faStar} className="text-gray-300 dark:text-gray-600" />);
+  }
+  return stars;
+};
 
-  const calculateAverageRating = () => {
-    if (!reviews.length) return doctor?.avgRating || 0;
-    const sum = reviews.reduce((acc, review) => acc + review.rating, 0);
-    return sum / reviews.length;
-  };
+const calculateAverageRating = () => {
+  if (!reviews.length) return doctor?.avgRating || 0;
+  const sum = reviews.reduce((acc, review) => acc + review.rating, 0);
+  return sum / reviews.length;
+};
 
   if (loading) {
     return (

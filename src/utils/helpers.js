@@ -1,4 +1,5 @@
-import { jsPDF } from 'jspdf';
+import 'jspdf';
+import 'jspdf-autotable';
 import 'jspdf-autotable';
 import pako from 'pako';
 import Fuse from 'fuse.js';
@@ -226,12 +227,18 @@ export const validateVitals = (vitals) => {
 
 export const generatePDF = async (type, data) => {
   try {
+    // Dynamically import jsPDF to avoid issues
+    const { default: jsPDF } = await import('jspdf');
     const doc = new jsPDF();
     
-    // Add logo
+    // Add logo (try-catch for logo)
     try {
-      doc.addImage(logoBase64, 'PNG', 10, 10, 30, 15);
-    } catch {
+      // If you have a logo base64, use it, otherwise skip
+      if (typeof logoBase64 !== 'undefined' && logoBase64) {
+        doc.addImage(logoBase64, 'PNG', 10, 10, 30, 15);
+      }
+    // eslint-disable-next-line no-unused-vars
+    } catch (logoError) {
       console.warn('Logo not found, continuing without logo');
     }
 
@@ -246,16 +253,29 @@ export const generatePDF = async (type, data) => {
 
     switch (type) {
       case 'prescription':
-        generatePrescriptionPDF(doc, data);
+        // Make sure generatePrescriptionPDF is defined
+        if (typeof generatePrescriptionPDF === 'function') {
+          generatePrescriptionPDF(doc, data);
+        } else {
+          doc.text('Prescription data unavailable', 10, 50);
+        }
         break;
       case 'salary-slip':
-        generateSalarySlipPDF(doc, data);
+        if (typeof generateSalarySlipPDF === 'function') {
+          generateSalarySlipPDF(doc, data);
+        } else {
+          doc.text('Salary slip data unavailable', 10, 50);
+        }
         break;
       case 'medical-summary':
-        generateMedicalSummaryPDF(doc, data);
+        if (typeof generateMedicalSummaryPDF === 'function') {
+          generateMedicalSummaryPDF(doc, data);
+        } else {
+          doc.text('Medical summary data unavailable', 10, 50);
+        }
         break;
       default:
-        throw new Error('Unknown PDF type');
+        doc.text(`Unknown PDF type: ${type}`, 10, 50);
     }
 
     // Add footer with timestamp
@@ -266,8 +286,8 @@ export const generatePDF = async (type, data) => {
       doc.setTextColor(150);
       doc.text(
         `Generated on ${new Date().toLocaleString()} - Page ${i} of ${pageCount}`,
-        doc.internal.pageSize.width / 2,
-        doc.internal.pageSize.height - 10,
+        doc.internal.pageSize.getWidth() / 2,
+        doc.internal.pageSize.getHeight() - 10,
         { align: 'center' }
       );
     }
@@ -275,9 +295,9 @@ export const generatePDF = async (type, data) => {
     // Return as base64
     const pdfBase64 = doc.output('datauristring').split(',')[1];
     return pdfBase64;
-  } catch {
-    console.error('PDF generation error occurred');
-    throw new Error('Failed to generate PDF');
+  } catch (error) {
+    console.error('PDF generation error:', error);
+    throw new Error(`Failed to generate PDF: ${error.message}`);
   }
 };
 
@@ -382,6 +402,13 @@ const generatePrescriptionPDF = (doc, data) => {
 };
 
 const generateSalarySlipPDF = (doc, data) => {
+  // Add validation for required data
+  if (!data) {
+    console.error('No data provided for salary slip');
+    doc.text('Error: No data available', 10, 40);
+    return;
+  }
+
   let yPos = 40;
 
   // Employee info
@@ -391,55 +418,92 @@ const generateSalarySlipPDF = (doc, data) => {
   yPos += 15;
 
   doc.setFontSize(11);
-  doc.text(`Month: ${data.month}/${data.year}`, 10, yPos);
-  doc.text(`Employee: ${data.userName}`, 120, yPos);
+  doc.text(`Month: ${data.month}/${data.year || ''}`, 10, yPos);
+  doc.text(`Employee: ${data.userName || 'N/A'}`, 120, yPos);
   yPos += 8;
   
   doc.setFontSize(10);
   doc.setTextColor(80);
-  doc.text(`Role: ${data.userRole}`, 10, yPos);
+  doc.text(`Role: ${data.userRole || 'N/A'}`, 10, yPos);
   doc.text(`Department: ${data.userDepartment || 'N/A'}`, 120, yPos);
   yPos += 8;
-  doc.text(`Employee ID: ${data.userId}`, 10, yPos);
+  doc.text(`Employee ID: ${data.userId || 'N/A'}`, 10, yPos);
   yPos += 15;
 
-  // Salary details table
+  // Salary details table - handle missing values
+  const baseSalary = data.baseSalary || 0;
+  const perDaySalary = data.perDaySalary || (baseSalary / 26);
+  const calculatedSalary = data.calculatedSalary || 0;
+  const workingDays = data.workingDays || 0;
+  const absentDays = data.absentDays || 0;
+
   const tableData = [
-    ['Base Salary', `PKR ${data.baseSalary.toLocaleString()}`],
-    ['Working Days', data.workingDays],
-    ['Absent Days', data.absentDays],
-    ['Per Day Rate', `PKR ${data.perDaySalary.toLocaleString()}`],
-    ['Calculated Salary', `PKR ${data.calculatedSalary.toLocaleString()}`],
+    ['Base Salary', `PKR ${baseSalary.toLocaleString()}`],
+    ['Working Days', workingDays],
+    ['Absent Days', absentDays],
+    ['Per Day Rate', `PKR ${perDaySalary.toLocaleString()}`],
+    ['Calculated Salary', `PKR ${calculatedSalary.toLocaleString()}`],
     ['Status', data.status === 'paid' ? 'PAID' : 'PENDING']
   ];
 
-  doc.autoTable({
-    startY: yPos,
-    body: tableData,
-    theme: 'plain',
-    styles: { fontSize: 10, cellPadding: 5 },
-    columnStyles: { 0: { fontStyle: 'bold' } }
-  });
+  // Check if autoTable is available
+  if (typeof doc.autoTable === 'function') {
+    doc.autoTable({
+      startY: yPos,
+      body: tableData,
+      theme: 'plain',
+      styles: { fontSize: 10, cellPadding: 5 },
+      columnStyles: { 0: { fontStyle: 'bold' } }
+    });
+    yPos = doc.lastAutoTable.finalY + 15;
+  } else {
+    // Fallback if autoTable is not available
+    tableData.forEach(row => {
+      doc.setFontSize(10);
+      doc.text(`${row[0]}: ${row[1]}`, 10, yPos);
+      yPos += 8;
+    });
+    yPos += 15;
+  }
 
-  yPos = doc.lastAutoTable.finalY + 15;
-
-  // Payment info
+  // Payment info with safe date handling
   if (data.status === 'paid') {
     doc.setFontSize(10);
     doc.setTextColor(0, 128, 0);
-    doc.text(`Paid on: ${new Date(data.paidAt).toLocaleDateString()}`, 10, yPos);
+    
+    let paidOnText = 'Paid on: N/A';
+    if (data.paymentInfo?.paidAt) {
+      try {
+        const paidDate = data.paymentInfo.paidAt.toDate ? data.paymentInfo.paidAt.toDate() : new Date(data.paymentInfo.paidAt);
+        paidOnText = `Paid on: ${paidDate.toLocaleDateString()}`;
+      // eslint-disable-next-line no-unused-vars
+      } catch (e) {
+        paidOnText = 'Paid on: Date unavailable';
+      }
+    } else if (data.paidAt) {
+      try {
+        const paidDate = data.paidAt.toDate ? data.paidAt.toDate() : new Date(data.paidAt);
+        paidOnText = `Paid on: ${paidDate.toLocaleDateString()}`;
+      // eslint-disable-next-line no-unused-vars
+      } catch (e) {
+        paidOnText = 'Paid on: Date unavailable';
+      }
+    }
+    
+    doc.text(paidOnText, 10, yPos);
     yPos += 6;
-    doc.text(`Paid by: ${data.paidBy}`, 10, yPos);
+    doc.text(`Paid by: ${data.paymentInfo?.paidBy || data.paidBy || 'System'}`, 10, yPos);
   } else {
     doc.setTextColor(255, 0, 0);
     doc.text('STATUS: PENDING PAYMENT', 10, yPos);
   }
 
   // Admin signature
+  const pageHeight = doc.internal.pageSize.height || doc.internal.pageSize.getHeight();
   doc.setFontSize(10);
   doc.setTextColor(0);
-  doc.text('Admin Signature:', 130, doc.internal.pageSize.height - 30);
-  doc.line(130, doc.internal.pageSize.height - 25, 190, doc.internal.pageSize.height - 25);
+  doc.text('Admin Signature:', 130, pageHeight - 30);
+  doc.line(130, pageHeight - 25, 190, pageHeight - 25);
 };
 
 const generateMedicalSummaryPDF = (doc, data) => {

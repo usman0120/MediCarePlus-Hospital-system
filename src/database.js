@@ -21,7 +21,7 @@ import {
   deleteDoc
 } from 'firebase/firestore';
 import { db } from './firebase';
-import { compressData, generatePDF } from './utils/helpers';
+import { compressData, generatePDF, formatCurrency } from '../src/utils/helpers';
 import { 
   APPOINTMENT_STATUS, 
   VISIT_STATUS, 
@@ -1469,11 +1469,39 @@ export const calculateSalary = async (userId, month, year, calculatedBy) => {
       const perDaySalary = monthlySalary / 26;
       const calculatedSalary = workingDays * perDaySalary;
 
+      // Determine user department (handle both system users and department staff)
+      let userDepartment = user.department || user.userDepartment || null;
+      
+      // If no department, try to find if user is department staff
+      if (!userDepartment) {
+        try {
+          // Check if this user exists in departmentStaff collection
+          const departmentsResult = await getDocs(collection(db, 'departments'));
+          for (const deptDoc of departmentsResult.docs) {
+            const staffQuery = query(
+              collection(db, 'departmentStaff'),
+              where('departmentId', '==', deptDoc.id),
+              where('id', '==', userId)
+            );
+            const staffSnapshot = await getDocs(staffQuery);
+            if (!staffSnapshot.empty) {
+              userDepartment = deptDoc.data().name;
+              break;
+            }
+          }
+        } catch (error) {
+          console.error('Error checking department staff:', error);
+        }
+      }
+
       // Create salary record
       const salaryRef = doc(collection(db, 'salaryRecords'));
       const salaryRecord = {
         id: salaryRef.id,
         userId,
+        userName: user.fullName || user.name || 'Unknown',
+        userRole: user.role || 'staff',
+        userDepartment: userDepartment || 'N/A',
         month,
         year,
         baseSalary: monthlySalary,
@@ -1487,24 +1515,43 @@ export const calculateSalary = async (userId, month, year, calculatedBy) => {
         calculatedBy,
         calculatedAt: serverTimestamp(),
         paidAt: null,
-        paidBy: null
+        paidBy: null,
+        paymentMethod: null,
+        paymentReference: null
       };
 
       transaction.set(salaryRef, salaryRecord);
 
-      // Generate PDF
-      const pdfBase64 = await generatePDF('salary-slip', {
-        ...salaryRecord,
-        userName: user.fullName,
-        userRole: user.role,
-        userDepartment: user.department
-      });
-
-      const compressedPDF = compressData(pdfBase64);
-      
-      transaction.update(salaryRef, {
-        pdfBase64: compressedPDF
-      });
+      // Generate PDF - with error handling for missing data
+      let pdfBase64 = null;
+      try {
+        pdfBase64 = await generatePDF('salary-slip', {
+          userId: userId,
+          userName: user.fullName || user.name || 'Unknown',
+          userRole: user.role || 'staff',
+          userDepartment: userDepartment || 'N/A',
+          month: month,
+          year: year,
+          baseSalary: monthlySalary,
+          workingDays: workingDays,
+          absentDays: absentDays,
+          lateDays: lateDays,
+          halfDays: halfDays,
+          perDaySalary: perDaySalary,
+          calculatedSalary: calculatedSalary,
+          status: 'pending',
+          paidAt: null,
+          paidBy: null
+        });
+        
+        const compressedPDF = compressData(pdfBase64);
+        transaction.update(salaryRef, {
+          pdfBase64: compressedPDF
+        });
+      } catch (pdfError) {
+        console.error('Error generating PDF for salary:', pdfError);
+        // Continue without PDF - don't fail the transaction
+      }
 
       return { success: true, data: salaryRecord };
     });
@@ -1580,37 +1627,69 @@ export const getDepartments = async () => {
 
 export const submitRating = async (ratingData) => {
   try {
-    if (!ratingData.patientId || !ratingData.doctorId || !ratingData.rating) {
+    const { patientId, doctorId, rating, review } = ratingData;
+
+    if (!patientId || !doctorId || !rating) {
       return { success: false, error: 'Missing required fields' };
     }
 
+    if (rating < 1 || rating > 5) {
+      return { success: false, error: 'Rating must be between 1 and 5' };
+    }
+
+    // Check if patient has already rated this doctor
+    const existingRatingQuery = query(
+      collection(db, 'ratings'),
+      where('patientId', '==', patientId),
+      where('doctorId', '==', doctorId)
+    );
+    
+    const existingSnapshot = await getDocs(existingRatingQuery);
+    
+    if (!existingSnapshot.empty) {
+      return { 
+        success: false, 
+        error: 'You have already rated this doctor. You can only rate once per doctor.',
+        alreadyRated: true
+      };
+    }
+
+    // Add rating
     const ratingRef = doc(collection(db, 'ratings'));
-    const rating = {
+    const ratingDoc = {
       id: ratingRef.id,
-      ...ratingData,
-      createdAt: serverTimestamp()
+      patientId,
+      doctorId,
+      rating,
+      review: review || '',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
     };
 
-    await setDoc(ratingRef, rating);
+    await setDoc(ratingRef, ratingDoc);
 
     // Update doctor's average rating
-    const doctorRef = doc(db, 'users', ratingData.doctorId);
+    const doctorRef = doc(db, 'users', doctorId);
     const doctorDoc = await getDoc(doctorRef);
     
     if (doctorDoc.exists()) {
-      const doctor = doctorDoc.data();
-      const currentRatings = doctor.ratings || [];
-      const total = currentRatings.reduce((sum, r) => sum + r, 0) + ratingData.rating;
-      const newAvgRating = total / (currentRatings.length + 1);
+      const doctorData = doctorDoc.data();
+      const currentRatings = doctorData.ratings || [];
+      const currentAvg = doctorData.avgRating || 0;
+      const currentTotal = doctorData.totalRatings || 0;
+      
+      const newTotal = currentTotal + 1;
+      const newAvg = ((currentAvg * currentTotal) + rating) / newTotal;
       
       await updateDoc(doctorRef, {
-        ratings: arrayUnion(ratingData.rating),
-        avgRating: newAvgRating,
+        ratings: [...currentRatings, ratingRef.id],
+        avgRating: newAvg,
+        totalRatings: newTotal,
         updatedAt: serverTimestamp()
       });
     }
 
-    return { success: true, data: rating };
+    return { success: true, data: ratingDoc };
   } catch (error) {
     console.error('Error submitting rating:', error);
     return { success: false, error: error.message };
@@ -5552,58 +5631,129 @@ export const getDashboardStats = async (date) => {
 
 // ==================== STAFF ATTENDANCE ====================
 
+/**
+ * Get staff attendance for a specific date (including department staff)
+ * @param {string} date - Date string
+ * @returns {Promise<Object>} Staff attendance records
+ */
 export const getStaffAttendance = async (date) => {
   try {
-    // Get all active staff
-    const staffQuery = query(
-      collection(db, 'users'),
-      where('role', 'in', ['doctor', 'nurse', 'lab', 'receptionist']),
-      where('accountStatus', '==', 'active')
-    );
-    const staffSnapshot = await getDocs(staffQuery);
+    // Use the new comprehensive function
+    const result = await getCompleteAttendanceByDate(date);
+    if (result.success) {
+      return result;
+    }
+    
+    // Fallback to original logic if needed
+    // Get all active system staff
+    const systemRoles = ['doctor', 'receptionist', 'lab', 'accountant', 'admin', 'nurse'];
+    const staffPromises = systemRoles.map(role => getUsersByRole(role));
+    const staffResults = await Promise.all(staffPromises);
+    
     const staffMap = new Map();
     
-    staffSnapshot.forEach(doc => {
-      staffMap.set(doc.id, { id: doc.id, ...doc.data() });
-    });
+    for (let i = 0; i < staffResults.length; i++) {
+      if (staffResults[i].success) {
+        staffResults[i].data.forEach(user => {
+          if (user.accountStatus === 'active' && user.baseSalary && user.baseSalary > 0) {
+            staffMap.set(user.id, {
+              id: user.id,
+              fullName: user.fullName,
+              role: user.role,
+              department: user.department || 'Administration',
+              baseSalary: user.baseSalary,
+              source: 'system'
+            });
+          }
+        });
+      }
+    }
+    
+    // Add department staff
+    const departmentsResult = await getDepartments();
+    if (departmentsResult.success) {
+      for (const dept of departmentsResult.data) {
+        const staffResult = await getDepartmentStaff(dept.id);
+        if (staffResult.success && staffResult.data.length > 0) {
+          staffResult.data.forEach(staff => {
+            if (staff.status === 'active' && staff.salary && staff.salary > 0) {
+              staffMap.set(staff.id, {
+                id: staff.id,
+                fullName: staff.name,
+                role: staff.role,
+                department: dept.name,
+                baseSalary: staff.salary,
+                source: 'department'
+              });
+            }
+          });
+        }
+      }
+    }
     
     // Get attendance for the date
-    const attendanceQuery = query(
-      collection(db, 'attendance'),
-      where('date', '==', date)
-    );
-    const attendanceSnapshot = await getDocs(attendanceQuery);
+    let attendanceSnapshot;
+    try {
+      const attendanceQuery = query(
+        collection(db, 'attendance'),
+        where('date', '==', date)
+      );
+      attendanceSnapshot = await getDocs(attendanceQuery);
+    } catch (error) {
+      console.error('Error fetching attendance with index:', error);
+      const allAttendance = await getDocs(collection(db, 'attendance'));
+      attendanceSnapshot = {
+        docs: allAttendance.docs.filter(doc => doc.data().date === date),
+        forEach: (cb) => attendanceSnapshot.docs.forEach(cb)
+      };
+    }
     
     const attendanceRecords = [];
+    const markedStaffIds = new Set();
     
-    attendanceSnapshot.forEach(doc => {
+    for (const doc of attendanceSnapshot.docs) {
       const record = doc.data();
+      markedStaffIds.add(record.userId);
       const staff = staffMap.get(record.userId);
+      
       if (staff) {
         attendanceRecords.push({
           id: doc.id,
-          ...record,
+          userId: record.userId,
           fullName: staff.fullName,
           role: staff.role,
-          department: staff.department
+          department: staff.department,
+          date: record.date,
+          status: record.status,
+          checkInTime: record.checkInTime,
+          markedBy: record.markedBy,
+          markedAt: record.markedAt?.toDate?.() || null
         });
         staffMap.delete(record.userId);
       }
-    });
+    }
     
-    // Add staff without attendance as absent
-    staffMap.forEach(staff => {
+    // Add unmarked staff as absent
+    for (const [userId, staff] of staffMap) {
       attendanceRecords.push({
-        id: `absent-${staff.id}`,
-        userId: staff.id,
+        id: `absent-${userId}`,
+        userId: userId,
         fullName: staff.fullName,
         role: staff.role,
         department: staff.department,
-        date,
+        date: date,
         status: 'absent',
+        checkInTime: null,
         markedBy: null,
-        markedAt: null
+        markedAt: null,
+        isAutoMarked: true
       });
+    }
+    
+    // Sort records
+    attendanceRecords.sort((a, b) => {
+      if (a.department !== b.department) return a.department.localeCompare(b.department);
+      return a.fullName.localeCompare(b.fullName);
     });
     
     return { success: true, data: attendanceRecords };
@@ -8292,41 +8442,81 @@ export const createAppointment = async (appointmentData) => {
       return { success: false, error: 'Missing required fields' };
     }
 
-    // Check if new slot is available, excluding the current appointment
+    // Check if time slot is available
     const availabilityCheck = await checkSlotAvailability(
-      appointment.doctorId, 
-      appointment.newDate, 
-      appointment.newTime,
+      appointmentData.doctorId,
+      appointmentData.date,
+      appointmentData.time
     );
     
-    if (!availabilityCheck.success || !availabilityCheck.available) {
+    if (!availabilityCheck.success) {
+      return { success: false, error: availabilityCheck.error || 'Failed to check availability' };
+    }
+    
+    if (!availabilityCheck.available) {
       return { success: false, error: 'Selected time slot is not available' };
     }
 
-    // Get doctor details to fetch department name
+    // Get doctor details to fetch department name and consultation fee
     const doctorData = await getUserById(appointmentData.doctorId);
-    let departmentName = appointmentData.department || appointmentData.departmentId;
+    
+    // Handle department name
+    let departmentName = appointmentData.department || appointmentData.departmentId || 'General';
     
     if (doctorData.success && doctorData.data.department) {
-      // If doctor has department, use that
       departmentName = doctorData.data.department;
     }
+    
+    // Handle department ID safely - don't store undefined
+    let departmentId = null;
+    if (appointmentData.departmentId) {
+      departmentId = appointmentData.departmentId;
+    } else if (departmentName && departmentName !== 'General') {
+      try {
+        const departmentsResult = await getDepartments();
+        if (departmentsResult.success) {
+          const foundDept = departmentsResult.data.find(d => 
+            d.name?.toLowerCase() === departmentName?.toLowerCase() || 
+            d.id === departmentName
+          );
+          if (foundDept) {
+            departmentId = foundDept.id;
+          }
+        }
+      } catch (deptError) {
+        console.error('Error fetching department:', deptError);
+        // Don't fail the appointment creation for department lookup error
+      }
+    }
+
+    // Calculate payment amount
+    const paymentAmount = doctorData.success ? (doctorData.data.consultationFee || 0) : 1000;
 
     const appointmentRef = doc(collection(db, 'appointments'));
     const appointment = {
       id: appointmentRef.id,
       patientId: appointmentData.patientId,
       doctorId: appointmentData.doctorId,
-      department: departmentName, // Store department name
-      departmentId: appointmentData.departmentId || appointmentData.department, // Store department ID if available
+      department: departmentName,
       date: appointmentData.date,
       time: appointmentData.time,
-      reason: appointmentData.reason,
+      reason: appointmentData.reason || '',
       isEmergency: appointmentData.isEmergency || false,
-      status: 'pending', // Ensure status is always set
+      status: 'pending',
+      paymentStatus: 'pending',
+      paymentAmount: paymentAmount,
+      paymentReference: null,
+      paymentProof: null,
+      paymentMethod: null,
+      paidAt: null,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     };
+    
+    // Only add departmentId if it exists (not undefined)
+    if (departmentId) {
+      appointment.departmentId = departmentId;
+    }
 
     await setDoc(appointmentRef, appointment);
     console.log('Appointment created with ID:', appointmentRef.id, 'Status:', appointment.status);
@@ -8335,53 +8525,72 @@ export const createAppointment = async (appointmentData) => {
     const doctorName = doctorData.success ? doctorData.data.fullName : 'Doctor';
 
     // Get patient details for notification
-    const patientData = await getUserById(appointmentData.patientId);
-    const patientName = patientData.success ? patientData.data.fullName : 'Patient';
+    let patientName = 'Patient';
+    try {
+      const patientData = await getUserById(appointmentData.patientId);
+      if (patientData.success) {
+        patientName = patientData.data.fullName;
+      }
+    } catch (patientError) {
+      console.error('Error fetching patient details:', patientError);
+    }
 
     // Create notification for patient
-    await addDoc(collection(db, 'notifications'), {
-      userId: appointmentData.patientId,
-      type: 'APPOINTMENT_CREATED',
-      title: 'Appointment Request Submitted',
-      message: `Your appointment with Dr. ${doctorName} on ${appointmentData.date} at ${appointmentData.time} has been submitted for approval.`,
-      appointmentId: appointmentRef.id,
-      read: false,
-      timestamp: serverTimestamp()
-    });
+    try {
+      await addDoc(collection(db, 'notifications'), {
+        userId: appointmentData.patientId,
+        type: 'APPOINTMENT_CREATED',
+        title: 'Appointment Request Submitted',
+        message: `Your appointment with Dr. ${doctorName} on ${appointmentData.date} at ${appointmentData.time} has been submitted for approval. Payment of ${formatCurrency(paymentAmount)} is required upon approval.`,
+        appointmentId: appointmentRef.id,
+        read: false,
+        timestamp: serverTimestamp()
+      });
+    } catch (notifError) {
+      console.error('Error creating patient notification:', notifError);
+    }
 
     // Create notification for all receptionists
-    const receptionists = await getUsersByRole('receptionist');
-    if (receptionists.success) {
-      const batch = writeBatch(db);
-      receptionists.data.forEach(staff => {
-        const notifRef = doc(collection(db, 'notifications'));
-        batch.set(notifRef, {
-          userId: staff.id,
-          type: 'NEW_APPOINTMENT_REQUEST',
-          title: 'New Appointment Request',
-          message: `New appointment request from ${patientName} with Dr. ${doctorName}`,
-          appointmentId: appointmentRef.id,
-          patientId: appointmentData.patientId,
-          doctorId: appointmentData.doctorId,
-          read: false,
-          timestamp: serverTimestamp(),
-          priority: appointmentData.isEmergency ? 'high' : 'normal'
+    try {
+      const receptionists = await getUsersByRole('receptionist');
+      if (receptionists.success && receptionists.data.length > 0) {
+        const batch = writeBatch(db);
+        receptionists.data.forEach(staff => {
+          const notifRef = doc(collection(db, 'notifications'));
+          batch.set(notifRef, {
+            userId: staff.id,
+            type: 'NEW_APPOINTMENT_REQUEST',
+            title: 'New Appointment Request',
+            message: `New appointment request from ${patientName} with Dr. ${doctorName}`,
+            appointmentId: appointmentRef.id,
+            patientId: appointmentData.patientId,
+            doctorId: appointmentData.doctorId,
+            read: false,
+            timestamp: serverTimestamp(),
+            priority: appointmentData.isEmergency ? 'high' : 'normal'
+          });
         });
-      });
-      await batch.commit();
+        await batch.commit();
+      }
+    } catch (receptionError) {
+      console.error('Error creating receptionist notifications:', receptionError);
     }
 
     // Create notification for doctor
-    await addDoc(collection(db, 'notifications'), {
-      userId: appointmentData.doctorId,
-      type: 'APPOINTMENT_REQUEST',
-      title: 'New Appointment Request',
-      message: `New appointment request from ${patientName} on ${appointmentData.date} at ${appointmentData.time}`,
-      appointmentId: appointmentRef.id,
-      patientId: appointmentData.patientId,
-      read: false,
-      timestamp: serverTimestamp()
-    });
+    try {
+      await addDoc(collection(db, 'notifications'), {
+        userId: appointmentData.doctorId,
+        type: 'APPOINTMENT_REQUEST',
+        title: 'New Appointment Request',
+        message: `New appointment request from ${patientName} on ${appointmentData.date} at ${appointmentData.time}`,
+        appointmentId: appointmentRef.id,
+        patientId: appointmentData.patientId,
+        read: false,
+        timestamp: serverTimestamp()
+      });
+    } catch (doctorNotifError) {
+      console.error('Error creating doctor notification:', doctorNotifError);
+    }
 
     return { success: true, data: { id: appointmentRef.id, ...appointment } };
   } catch (error) {
@@ -8390,37 +8599,43 @@ export const createAppointment = async (appointmentData) => {
   }
 };
 
-/**
- * Check if a specific time slot is available
- * @param {string} doctorId - Doctor ID
- * @param {string} date - Date string
- * @param {string} time - Time string
- * @param {string} excludeAppointmentId - Optional appointment ID to exclude from check (for updates)
- * @returns {Promise<Object>} Availability status
- */
 export const checkSlotAvailability = async (doctorId, date, time, excludeAppointmentId = null) => {
   try {
+    if (!doctorId || !date || !time) {
+      return { success: false, error: 'Missing required parameters', available: false };
+    }
+
+    console.log('Checking slot availability for:', { doctorId, date, time, excludeAppointmentId });
+    
     const q = query(
       collection(db, 'appointments'),
       where('doctorId', '==', doctorId),
       where('date', '==', date),
       where('time', '==', time),
-      where('status', 'in', ['pending', 'approved', 'checked-in'])
+      where('status', 'in', ['pending', 'approved', 'checked-in', 'confirmed'])
     );
 
     const snapshot = await getDocs(q);
     
+    console.log('Found appointments count:', snapshot.docs.length);
+    
     // Filter out the appointment we're trying to approve if it's in the results
-    const conflictingAppointments = snapshot.docs.filter(doc => 
-      doc.id !== excludeAppointmentId
-    );
+    const conflictingAppointments = snapshot.docs.filter(doc => {
+      const isExcluded = doc.id === excludeAppointmentId;
+      if (isExcluded) {
+        console.log('Excluding current appointment:', doc.id);
+      }
+      return !isExcluded;
+    });
+    
+    console.log('Conflicting appointments after exclusion:', conflictingAppointments.length);
     
     const isAvailable = conflictingAppointments.length === 0;
 
     return { success: true, available: isAvailable };
   } catch (error) {
     console.error('Error checking slot availability:', error);
-    return { success: false, error: error.message };
+    return { success: false, error: error.message, available: false };
   }
 };
 
@@ -8432,6 +8647,10 @@ export const checkSlotAvailability = async (doctorId, date, time, excludeAppoint
  */
 export const approveAppointment = async (appointmentId, approvedBy) => {
   try {
+    if (!appointmentId || !approvedBy) {
+      return { success: false, error: 'Missing required fields' };
+    }
+
     const appointmentRef = doc(db, 'appointments', appointmentId);
     const appointmentDoc = await getDoc(appointmentRef);
 
@@ -8441,74 +8660,115 @@ export const approveAppointment = async (appointmentId, approvedBy) => {
 
     const appointment = appointmentDoc.data();
 
-    // Double-check slot availability
+    // Double-check slot availability - EXCLUDE the current appointment
     const availabilityCheck = await checkSlotAvailability(
       appointment.doctorId,
       appointment.date,
-      appointment.time
+      appointment.time,
+      appointmentId  // Pass the current appointment ID to exclude it from conflict check
     );
 
-    if (!availabilityCheck.success || !availabilityCheck.available) {
+    if (!availabilityCheck.success) {
+      return { success: false, error: availabilityCheck.error || 'Failed to check availability' };
+    }
+    
+    if (!availabilityCheck.available) {
       return { success: false, error: 'Time slot is no longer available' };
     }
 
+    // Get doctor details to fetch consultation fee
+    const doctorData = await getUserById(appointment.doctorId);
+    const consultationFee = doctorData.success ? (doctorData.data.consultationFee || 0) : 1000;
+
+    // Update appointment status to approved (waiting for payment)
     await updateDoc(appointmentRef, {
       status: 'approved',
+      paymentStatus: 'pending',  // Mark as pending payment
+      paymentAmount: consultationFee,  // Store the consultation fee
       approvedBy,
       approvedAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     });
 
-    // Get doctor and patient details
-    const [doctorData, patientData] = await Promise.all([
-      getUserById(appointment.doctorId),
-      getUserById(appointment.patientId)
-    ]);
-
+    // Get patient details for notification
+    const patientData = await getUserById(appointment.patientId);
     const doctorName = doctorData.success ? doctorData.data.fullName : 'Doctor';
     const patientName = patientData.success ? patientData.data.fullName : 'Patient';
 
-    // Create or get chat between doctor and patient
-    const chatResult = await createOrGetChat(appointment.doctorId, appointment.patientId);
-    if (chatResult.success && chatResult.isNew) {
-      console.log('New chat created between doctor and patient');
+    // Simple format currency function (avoid import issues)
+    const simpleFormatCurrency = (amount) => {
+      return new Intl.NumberFormat('en-PK', {
+        style: 'currency',
+        currency: 'PKR',
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0
+      }).format(amount);
+    };
+
+    // Notify patient that payment is required
+    try {
+      await addDoc(collection(db, 'notifications'), {
+        userId: appointment.patientId,
+        type: 'APPOINTMENT_APPROVED',
+        title: 'Appointment Approved - Payment Required',
+        message: `Your appointment with Dr. ${doctorName} on ${appointment.date} at ${appointment.time} has been approved. Please pay ${simpleFormatCurrency(consultationFee)} to confirm your appointment.`,
+        appointmentId,
+        doctorId: appointment.doctorId,
+        paymentAmount: consultationFee,
+        read: false,
+        timestamp: serverTimestamp()
+      });
+    } catch (notifError) {
+      console.error('Error creating notification for patient:', notifError);
+      // Don't fail the whole operation for notification errors
     }
 
-    // Notify patient
-    await addDoc(collection(db, 'notifications'), {
-      userId: appointment.patientId,
-      type: 'APPOINTMENT_APPROVED',
-      title: 'Appointment Approved',
-      message: `Your appointment with Dr. ${doctorName} on ${appointment.date} at ${appointment.time} has been approved. You can now chat with your doctor.`,
-      appointmentId,
-      doctorId: appointment.doctorId,
-      read: false,
-      timestamp: serverTimestamp()
-    });
-
-    // Notify doctor
-    await addDoc(collection(db, 'notifications'), {
-      userId: appointment.doctorId,
-      type: 'APPOINTMENT_SCHEDULED',
-      title: 'New Appointment Scheduled',
-      message: `Appointment with ${patientName} on ${appointment.date} at ${appointment.time} has been confirmed. You can now chat with the patient.`,
-      appointmentId,
-      patientId: appointment.patientId,
-      read: false,
-      timestamp: serverTimestamp()
-    });
+    // Notify receptionist that payment is pending
+    try {
+      const receptionists = await getUsersByRole('receptionist');
+      if (receptionists.success && receptionists.data && receptionists.data.length > 0) {
+        const batch = writeBatch(db);
+        receptionists.data.forEach(staff => {
+          if (staff && staff.id) {
+            const notifRef = doc(collection(db, 'notifications'));
+            batch.set(notifRef, {
+              userId: staff.id,
+              type: 'PAYMENT_PENDING',
+              title: 'Payment Pending',
+              message: `Patient ${patientName} needs to pay ${simpleFormatCurrency(consultationFee)} for appointment with Dr. ${doctorName}`,
+              appointmentId,
+              patientId: appointment.patientId,
+              doctorId: appointment.doctorId,
+              read: false,
+              timestamp: serverTimestamp(),
+              priority: 'normal'
+            });
+          }
+        });
+        await batch.commit();
+      }
+    } catch (receptionError) {
+      console.error('Error notifying receptionists:', receptionError);
+      // Don't fail the operation
+    }
 
     // Log approval
-    await addDoc(collection(db, 'auditLogs'), {
-      userId: approvedBy,
-      action: 'APPOINTMENT_APPROVED',
-      targetId: appointmentId,
-      patientId: appointment.patientId,
-      doctorId: appointment.doctorId,
-      timestamp: serverTimestamp()
-    });
+    try {
+      await addDoc(collection(db, 'auditLogs'), {
+        userId: approvedBy,
+        action: 'APPOINTMENT_APPROVED',
+        targetId: appointmentId,
+        patientId: appointment.patientId,
+        doctorId: appointment.doctorId,
+        paymentAmount: consultationFee,
+        paymentStatus: 'pending',
+        timestamp: serverTimestamp()
+      });
+    } catch (logError) {
+      console.error('Error logging approval:', logError);
+    }
 
-    return { success: true };
+    return { success: true, data: { consultationFee } };
   } catch (error) {
     console.error('Error approving appointment:', error);
     return { success: false, error: error.message };
@@ -9566,11 +9826,20 @@ export const checkInPatient = async (appointmentId, checkedInBy) => {
 
     const appointment = appointmentDoc.data();
 
-    // Only approved appointments can be checked in
-    if (appointment.status !== 'approved' && appointment.status !== 'scheduled') {
-      return { success: false, error: 'Only approved appointments can be checked in' };
+    // Check if appointment can be checked in (confirmed status after payment)
+    if (appointment.status !== 'confirmed') {
+      return { 
+        success: false, 
+        error: `Cannot check in. Appointment status is '${appointment.status}'. Must be 'confirmed' after payment verification.` 
+      };
     }
 
+    // Verify payment has been made
+    if (appointment.paymentStatus !== 'paid') {
+      return { success: false, error: 'Payment not confirmed for this appointment' };
+    }
+
+    // Update to checked-in status
     await updateDoc(appointmentRef, {
       status: 'checked-in',
       checkedInBy,
@@ -9582,6 +9851,10 @@ export const checkInPatient = async (appointmentId, checkedInBy) => {
     const patientData = await getUserById(appointment.patientId);
     const patientName = patientData.success ? patientData.data.fullName : 'Patient';
 
+    // Get doctor details
+    const doctorData = await getUserById(appointment.doctorId);
+    const doctorName = doctorData.success ? doctorData.data.fullName : 'Doctor';
+
     // Notify doctor
     await addDoc(collection(db, 'notifications'), {
       userId: appointment.doctorId,
@@ -9590,6 +9863,19 @@ export const checkInPatient = async (appointmentId, checkedInBy) => {
       message: `${patientName} has checked in for your ${appointment.time} appointment.`,
       appointmentId,
       patientId: appointment.patientId,
+      read: false,
+      timestamp: serverTimestamp(),
+      priority: appointment.isEmergency ? 'high' : 'normal'
+    });
+
+    // Notify patient
+    await addDoc(collection(db, 'notifications'), {
+      userId: appointment.patientId,
+      type: 'APPOINTMENT_CHECKED_IN',
+      title: 'Checked In',
+      message: `You have been checked in for your appointment with Dr. ${doctorName} at ${appointment.time}. Please wait in the waiting area.`,
+      appointmentId,
+      doctorId: appointment.doctorId,
       read: false,
       timestamp: serverTimestamp()
     });
@@ -9601,6 +9887,7 @@ export const checkInPatient = async (appointmentId, checkedInBy) => {
       targetId: appointmentId,
       patientId: appointment.patientId,
       doctorId: appointment.doctorId,
+      paymentVerified: true,
       timestamp: serverTimestamp()
     });
 
@@ -9610,7 +9897,6 @@ export const checkInPatient = async (appointmentId, checkedInBy) => {
     return { success: false, error: error.message };
   }
 };
-
 
 
 
@@ -9784,8 +10070,6 @@ export const getDoctorAppointmentsByStatus = async (doctorId, status) => {
   }
 };
 
-// Add these functions to database.js for doctor profile management
-
 /**
  * Update doctor profile
  * @param {string} doctorId - Doctor ID
@@ -9914,66 +10198,100 @@ export const getDoctorProfile = async (doctorId) => {
 
 
 // ==================== CHAT SYSTEM ====================
-
-
-/**
- * Create a new chat or get existing one between two participants
- */
 export const createOrGetChat = async (participant1, participant2) => {
   try {
-    // Validate participants
+    // Validate participants - ensure they are valid strings
     if (!participant1 || !participant2) {
-      return { success: false, error: 'Both participants are required' };
+      console.error('Invalid participants:', { participant1, participant2 });
+      return { success: false, error: 'Both participants are required', isNew: false };
     }
 
-    if (participant1 === participant2) {
-      return { success: false, error: 'Cannot create chat with yourself' };
+    // Convert to string and trim
+    const p1 = String(participant1).trim();
+    const p2 = String(participant2).trim();
+
+    if (!p1 || !p2) {
+      console.error('Empty participants after trimming');
+      return { success: false, error: 'Invalid participant IDs', isNew: false };
     }
 
-    const participants = [participant1, participant2].sort(); // Sort for consistent querying
+    if (p1 === p2) {
+      return { success: false, error: 'Cannot create chat with yourself', isNew: false };
+    }
 
-    // Check if chat already exists
-    const chatsQuery = query(
-      collection(db, 'chats'),
-      where('participants', '==', participants)
-    );
+    // Create a sorted array of participants for consistent querying
+    const participants = [p1, p2].sort();
 
-    const snapshot = await getDocs(chatsQuery);
+    console.log('Creating/getting chat for participants:', participants);
 
-    if (!snapshot.empty) {
-      // Chat exists, return it
-      const chatDoc = snapshot.docs[0];
-      return { 
-        success: true, 
-        data: { id: chatDoc.id, ...chatDoc.data() },
-        existing: true 
+    // Try to find existing chat using a different approach
+    // First, try to find chats where participant1 is in the participants array
+    let existingChatId = null;
+    let existingChatData = null;
+
+    try {
+      // Query for chats where participants array contains p1
+      const q1 = query(
+        collection(db, 'chats'),
+        where('participants', 'array-contains', p1)
+      );
+      const snapshot1 = await getDocs(q1);
+
+      // Check each chat to see if it also contains p2
+      for (const doc of snapshot1.docs) {
+        const chatData = doc.data();
+        if (chatData.participants && Array.isArray(chatData.participants)) {
+          if (chatData.participants.includes(p1) && chatData.participants.includes(p2)) {
+            existingChatId = doc.id;
+            existingChatData = chatData;
+            break;
+          }
+        }
+      }
+    } catch (queryError) {
+      console.error('Error querying existing chats:', queryError);
+      // Continue to create new chat
+    }
+
+    // If chat exists, return it
+    if (existingChatId && existingChatData) {
+      return {
+        success: true,
+        data: { id: existingChatId, ...existingChatData },
+        existing: true,
+        isNew: false
       };
     }
 
     // Create new chat
     const chatRef = doc(collection(db, 'chats'));
+    const unreadCount = {
+      [p1]: 0,
+      [p2]: 0
+    };
+    
     const chatData = {
       participants: participants,
       createdAt: serverTimestamp(),
       lastMessageAt: serverTimestamp(),
       lastMessage: null,
-      unreadCount: {
-        [participant1]: 0,
-        [participant2]: 0
-      },
-      participantsInfo: {} // Will store display names for quick access
+      unreadCount: unreadCount,
+      participantsInfo: {},
+      createdAtTimestamp: Date.now()
     };
 
     await setDoc(chatRef, chatData);
+    console.log('New chat created with ID:', chatRef.id);
 
-    return { 
-      success: true, 
+    return {
+      success: true,
       data: { id: chatRef.id, ...chatData },
-      existing: false 
+      existing: false,
+      isNew: true
     };
   } catch (error) {
-    console.error('Error creating/getting chat:', error);
-    return { success: false, error: error.message };
+    console.error('Error in createOrGetChat:', error);
+    return { success: false, error: error.message || 'Failed to create chat', isNew: false };
   }
 };
 
@@ -10562,5 +10880,1329 @@ export const addReactionSimple = async (messageId, userId, reaction) => {
   } catch (error) {
     console.error('Error adding reaction:', error);
     return { success: false, error: error.message };
+  }
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * Get department staff by user ID
+ * @param {string} userId - Staff user ID
+ * @returns {Promise<Object>} Department staff data
+ */
+export const getDepartmentStaffByUser = async (userId) => {
+  try {
+    // Search across all departments for this staff member
+    const departmentsResult = await getDepartments();
+    if (departmentsResult.success) {
+      for (const dept of departmentsResult.data) {
+        const staffResult = await getDepartmentStaff(dept.id);
+        if (staffResult.success) {
+          const found = staffResult.data.find(s => s.id === userId);
+          if (found) {
+            return { 
+              success: true, 
+              data: { 
+                ...found, 
+                department: dept.name,
+                departmentId: dept.id 
+              } 
+            };
+          }
+        }
+      }
+    }
+    return { success: false, error: 'Staff not found' };
+  } catch (error) {
+    console.error('Error fetching department staff by user:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+// ==================== ENHANCED SALARY SYSTEM ====================
+
+/**
+ * Get salary records with filters
+ * @param {Object} filters - { month, year, userId, status, department }
+ * @returns {Promise<Object>} Salary records
+ */
+export const getSalaryRecords = async (filters = {}) => {
+  try {
+    let constraints = [orderBy('year', 'desc'), orderBy('month', 'desc')];
+    
+    if (filters.userId) {
+      constraints.unshift(where('userId', '==', filters.userId));
+    }
+    if (filters.status) {
+      constraints.unshift(where('status', '==', filters.status));
+    }
+    if (filters.month) {
+      constraints.unshift(where('month', '==', filters.month));
+    }
+    if (filters.year) {
+      constraints.unshift(where('year', '==', filters.year));
+    }
+    
+    let q = query(collection(db, 'salaryRecords'), ...constraints);
+    const snapshot = await getDocs(q);
+    
+    let records = [];
+    for (const doc of snapshot.docs) {
+      const record = { id: doc.id, ...doc.data() };
+      records.push(record);
+    }
+    
+    // Apply department filter client-side if needed
+    if (filters.department) {
+      records = records.filter(r => r.userDepartment === filters.department);
+    }
+    
+    return { success: true, data: records };
+  } catch (error) {
+    console.error('Error getting salary records:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Generate salary slip for a record
+ * @param {string} salaryRecordId - Salary record ID
+ * @returns {Promise<Object>} PDF as base64
+ */
+export const generateSalarySlip = async (salaryRecordId) => {
+  try {
+    if (!salaryRecordId) {
+      return { success: false, error: 'Salary record ID is required' };
+    }
+
+    const salaryDoc = await getDoc(doc(db, 'salaryRecords', salaryRecordId));
+    if (!salaryDoc.exists()) {
+      return { success: false, error: 'Salary record not found' };
+    }
+    
+    const salary = salaryDoc.data();
+    
+    // Validate required data
+    if (!salary.userName && !salary.userId) {
+      return { success: false, error: 'Salary record missing user information' };
+    }
+
+    // Safely extract payment info
+    let paymentInfo = null;
+    if (salary.status === 'paid') {
+      paymentInfo = {
+        paidAt: salary.paidAt?.toDate ? salary.paidAt.toDate() : (salary.paidAt || null),
+        paidBy: salary.paidBy || 'System',
+        paymentMethod: salary.paymentMethod || 'Bank Transfer',
+        paymentReference: salary.paymentReference || 'N/A'
+      };
+    }
+    
+    // Prepare data for PDF with safe defaults
+    const pdfData = {
+      userId: salary.userId || 'N/A',
+      userName: salary.userName || 'Unknown Employee',
+      userRole: salary.userRole || 'Staff',
+      userDepartment: salary.userDepartment || 'N/A',
+      month: salary.month || new Date().getMonth() + 1,
+      year: salary.year || new Date().getFullYear(),
+      baseSalary: salary.baseSalary || 0,
+      workingDays: salary.workingDays || 0,
+      presentDays: salary.presentDays || 0,
+      absentDays: salary.absentDays || 0,
+      lateDays: salary.lateDays || 0,
+      halfDays: salary.halfDays || 0,
+      perDaySalary: salary.perDaySalary || ((salary.baseSalary || 0) / 26),
+      calculatedSalary: salary.calculatedSalary || 0,
+      status: salary.status || 'pending',
+      paidAt: salary.paidAt,
+      paidBy: salary.paidBy,
+      paymentInfo: paymentInfo
+    };
+    
+    // Import generatePDF dynamically to avoid circular dependencies
+    const { generatePDF } = await import('../src/utils/helpers');
+    
+    const pdfBase64 = await generatePDF('salary-slip', pdfData);
+    
+    if (!pdfBase64) {
+      return { success: false, error: 'Failed to generate PDF content' };
+    }
+    
+    return { success: true, data: pdfBase64 };
+  } catch (error) {
+    console.error('Error generating salary slip:', error);
+    return { success: false, error: error.message || 'Failed to generate salary slip' };
+  }
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// ==================== ENHANCED ATTENDANCE FUNCTIONS ====================
+
+/**
+ * Get all staff for attendance marking (includes system users + department staff)
+ * @returns {Promise<Object>} Combined staff list
+ */
+export const getAllStaffForAttendance = async () => {
+  try {
+    const allStaff = [];
+    
+    // 1. Get system users with base salary (active status)
+    const systemRoles = ['doctor', 'receptionist', 'lab', 'accountant', 'admin', 'nurse'];
+    const systemUsersPromises = systemRoles.map(role => getUsersByRole(role));
+    const systemResults = await Promise.all(systemUsersPromises);
+    
+    for (const result of systemResults) {
+      if (result.success) {
+        const usersWithSalary = result.data.filter(u => 
+          u.baseSalary && u.baseSalary > 0 && u.accountStatus === 'active'
+        );
+        allStaff.push(...usersWithSalary.map(u => ({
+          id: u.id,
+          userId: u.id,
+          fullName: u.fullName,
+          role: u.role,
+          department: u.department || 'Administration',
+          baseSalary: u.baseSalary,
+          source: 'system',
+          email: u.email,
+          phone: u.phone,
+          isSystemUser: true
+        })));
+      }
+    }
+    
+    // 2. Get department staff (non-system users with salary)
+    const departmentsResult = await getDepartments();
+    if (departmentsResult.success) {
+      for (const dept of departmentsResult.data) {
+        const staffResult = await getDepartmentStaff(dept.id);
+        if (staffResult.success && staffResult.data.length > 0) {
+          const staffWithSalary = staffResult.data.filter(s => 
+            s.salary && s.salary > 0 && s.status === 'active'
+          );
+          allStaff.push(...staffWithSalary.map(s => ({
+            id: s.id,
+            userId: s.id,
+            fullName: s.name,
+            role: s.role,
+            department: dept.name,
+            baseSalary: s.salary,
+            source: 'department',
+            departmentId: dept.id,
+            email: s.email,
+            phone: s.phone,
+            isSystemUser: false
+          })));
+        }
+      }
+    }
+    
+    // Remove duplicates
+    const uniqueStaff = allStaff.filter((staff, index, self) => 
+      index === self.findIndex(s => s.id === staff.id)
+    );
+    
+    return { success: true, data: uniqueStaff };
+  } catch (error) {
+    console.error('Error getting all staff for attendance:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Get complete attendance for a specific date (including unmarked staff as absent)
+ * @param {string} date - Date string (YYYY-MM-DD)
+ * @returns {Promise<Object>} Complete attendance records
+ */
+export const getCompleteAttendanceByDate = async (date) => {
+  try {
+    // Get all staff first
+    const staffResult = await getAllStaffForAttendance();
+    if (!staffResult.success) {
+      return staffResult;
+    }
+    
+    const allStaff = staffResult.data;
+    const staffMap = new Map();
+    allStaff.forEach(staff => {
+      staffMap.set(staff.userId, staff);
+    });
+    
+    // Get attendance records for this date
+    let attendanceSnapshot;
+    try {
+      const attendanceQuery = query(
+        collection(db, 'attendance'),
+        where('date', '==', date)
+      );
+      attendanceSnapshot = await getDocs(attendanceQuery);
+    // eslint-disable-next-line no-unused-vars
+    } catch (error) {
+      // Fallback: get all and filter
+      const allAttendance = await getDocs(collection(db, 'attendance'));
+      const filtered = [];
+      allAttendance.forEach(doc => {
+        if (doc.data().date === date) filtered.push(doc);
+      });
+      attendanceSnapshot = { docs: filtered, forEach: (cb) => filtered.forEach(cb) };
+    }
+    
+    const attendanceRecords = [];
+    const markedStaffIds = new Set();
+    
+    // Process existing attendance records
+    for (const docSnap of attendanceSnapshot.docs) {
+      const record = docSnap.data();
+      markedStaffIds.add(record.userId);
+      const staff = staffMap.get(record.userId);
+      
+      if (staff) {
+        attendanceRecords.push({
+          id: docSnap.id,
+          userId: record.userId,
+          fullName: staff.fullName,
+          role: staff.role,
+          department: staff.department,
+          date: record.date,
+          status: record.status,
+          checkInTime: record.checkInTime,
+          markedBy: record.markedBy,
+          markedAt: record.markedAt?.toDate?.() || null,
+          source: staff.source,
+          baseSalary: staff.baseSalary
+        });
+        staffMap.delete(record.userId);
+      }
+    }
+    
+    // Add unmarked staff as absent
+    for (const [userId, staff] of staffMap) {
+      attendanceRecords.push({
+        id: `absent-${userId}`,
+        userId: userId,
+        fullName: staff.fullName,
+        role: staff.role,
+        department: staff.department,
+        date: date,
+        status: 'absent',
+        checkInTime: null,
+        markedBy: null,
+        markedAt: null,
+        source: staff.source,
+        baseSalary: staff.baseSalary,
+        isAutoMarked: true
+      });
+    }
+    
+    // Sort by department then name
+    attendanceRecords.sort((a, b) => {
+      if (a.department !== b.department) return a.department.localeCompare(b.department);
+      return a.fullName.localeCompare(b.fullName);
+    });
+    
+    return { success: true, data: attendanceRecords };
+  } catch (error) {
+    console.error('Error getting complete attendance:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Bulk mark attendance for multiple staff
+ * @param {Array} attendanceData - Array of {userId, status}
+ * @param {string} date - Date string
+ * @param {string} markedBy - User ID marking attendance
+ * @returns {Promise<Object>} Success status
+ */
+export const bulkMarkAttendance = async (attendanceData, date, markedBy) => {
+  try {
+    if (!attendanceData || attendanceData.length === 0) {
+      return { success: false, error: 'No attendance data provided' };
+    }
+    
+    const batch = writeBatch(db);
+    const results = [];
+    
+    for (const item of attendanceData) {
+      const attendanceId = `${item.userId}_${date}`;
+      const attendanceRef = doc(db, 'attendance', attendanceId);
+      
+      const attendanceRecord = {
+        id: attendanceId,
+        userId: item.userId,
+        date: date,
+        status: item.status,
+        markedBy: markedBy,
+        markedAt: serverTimestamp(),
+        checkInTime: item.status === 'present' || item.status === 'late' ? new Date().toLocaleTimeString() : null,
+        updatedAt: serverTimestamp()
+      };
+      
+      batch.set(attendanceRef, attendanceRecord);
+      results.push({ userId: item.userId, status: item.status });
+    }
+    
+    await batch.commit();
+    
+    // Log bulk attendance
+    await addDoc(collection(db, 'auditLogs'), {
+      userId: markedBy,
+      action: 'BULK_ATTENDANCE_MARKED',
+      count: attendanceData.length,
+      date: date,
+      timestamp: serverTimestamp()
+    });
+    
+    return { success: true, data: results };
+  } catch (error) {
+    console.error('Error bulk marking attendance:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Get monthly attendance summary for a user
+ * @param {string} userId - User ID
+ * @param {number} month - Month (1-12)
+ * @param {number} year - Year
+ * @returns {Promise<Object>} Attendance summary
+ */
+export const getUserMonthlyAttendance = async (userId, month, year) => {
+  try {
+    const startDate = `${year}-${month.toString().padStart(2, '0')}-01`;
+    const endDate = `${year}-${month.toString().padStart(2, '0')}-31`;
+    
+    let attendanceDocs = [];
+    try {
+      const attendanceQuery = query(
+        collection(db, 'attendance'),
+        where('userId', '==', userId),
+        where('date', '>=', startDate),
+        where('date', '<=', endDate)
+      );
+      const snapshot = await getDocs(attendanceQuery);
+      attendanceDocs = snapshot.docs;
+    // eslint-disable-next-line no-unused-vars
+    } catch (indexError) {
+      // Fallback: get all and filter client-side
+      const allQuery = query(collection(db, 'attendance'), where('userId', '==', userId));
+      const allSnapshot = await getDocs(allQuery);
+      attendanceDocs = allSnapshot.docs.filter(doc => {
+        const date = doc.data().date;
+        return date >= startDate && date <= endDate;
+      });
+    }
+    
+    let present = 0;
+    let absent = 0;
+    let late = 0;
+    let halfDay = 0;
+    
+    for (const doc of attendanceDocs) {
+      const status = doc.data().status;
+      switch (status) {
+        case 'present': present++; break;
+        case 'absent': absent++; break;
+        case 'late': late++; break;
+        case 'half-day': halfDay++; break;
+      }
+    }
+    
+    // Calculate working days (present = 1, half-day = 0.5, late = 0.5)
+    const workingDays = present + (halfDay * 0.5) + (late * 0.5);
+    
+    return {
+      success: true,
+      data: {
+        userId,
+        month,
+        year,
+        present,
+        absent,
+        late,
+        halfDay,
+        workingDays,
+        totalMarked: attendanceDocs.length
+      }
+    };
+  } catch (error) {
+    console.error('Error getting monthly attendance:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+// ==================== ENHANCED SALARY FUNCTIONS ====================
+
+/**
+ * Calculate salary for a user with attendance data
+ * @param {string} userId - User ID
+ * @param {number} month - Month (1-12)
+ * @param {number} year - Year
+ * @param {string} calculatedBy - Calculator user ID
+ * @returns {Promise<Object>} Salary record
+ */
+export const calculateSalaryWithAttendance = async (userId, month, year, calculatedBy) => {
+  try {
+    // Get user details - could be system user or department staff
+    let baseSalary = 0;
+    let userRole = '';
+    let userName = '';
+    let userDepartment = '';
+    
+    // First check if system user
+    const userDoc = await getDoc(doc(db, 'users', userId));
+    
+    if (userDoc.exists()) {
+      const userData = userDoc.data();
+      baseSalary = userData.baseSalary || 0;
+      userRole = userData.role || 'staff';
+      userName = userData.fullName || 'Unknown';
+      userDepartment = userData.department || 'Administration';
+    } else {
+      // Check department staff
+      const departmentsResult = await getDepartments();
+      if (departmentsResult.success) {
+        for (const dept of departmentsResult.data) {
+          const staffQuery = query(
+            collection(db, 'departmentStaff'),
+            where('departmentId', '==', dept.id),
+            where('id', '==', userId)
+          );
+          const staffSnapshot = await getDocs(staffQuery);
+          if (!staffSnapshot.empty) {
+            const staffData = staffSnapshot.docs[0].data();
+            baseSalary = staffData.salary || 0;
+            userRole = staffData.role || 'staff';
+            userName = staffData.name || 'Unknown';
+            userDepartment = dept.name;
+            break;
+          }
+        }
+      }
+    }
+    
+    if (baseSalary === 0) {
+      return { success: false, error: 'No base salary configured for this staff member' };
+    }
+    
+    // Get monthly attendance
+    const attendanceResult = await getUserMonthlyAttendance(userId, month, year);
+    if (!attendanceResult.success) {
+      return { success: false, error: attendanceResult.error };
+    }
+    
+    const attendance = attendanceResult.data;
+    const workingDays = attendance.workingDays;
+    const perDaySalary = baseSalary / 26; // 26 working days assumption
+    const calculatedSalary = workingDays * perDaySalary;
+    
+    // Check if salary already calculated for this month
+    let existingRecord = null;
+    let salaryRef;
+    let isUpdate = false;
+    
+    try {
+      const existingQuery = query(
+        collection(db, 'salaryRecords'),
+        where('userId', '==', userId),
+        where('month', '==', month),
+        where('year', '==', year)
+      );
+      const existingSnapshot = await getDocs(existingQuery);
+      
+      if (!existingSnapshot.empty) {
+        existingRecord = { id: existingSnapshot.docs[0].id, ...existingSnapshot.docs[0].data() };
+        salaryRef = doc(db, 'salaryRecords', existingSnapshot.docs[0].id);
+        isUpdate = true;
+      } else {
+        salaryRef = doc(collection(db, 'salaryRecords'));
+      }
+    // eslint-disable-next-line no-unused-vars
+    } catch (error) {
+      salaryRef = doc(collection(db, 'salaryRecords'));
+    }
+    
+    const salaryRecord = {
+      userId,
+      userName,
+      userRole,
+      userDepartment,
+      month,
+      year,
+      baseSalary,
+      workingDays,
+      presentDays: attendance.present,
+      absentDays: attendance.absent,
+      lateDays: attendance.late,
+      halfDays: attendance.halfDay,
+      perDaySalary,
+      calculatedSalary,
+      status: 'pending',
+      calculatedBy,
+      calculatedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    };
+    
+    if (isUpdate && existingRecord) {
+      await updateDoc(salaryRef, { ...salaryRecord, updatedAt: serverTimestamp() });
+      return { success: true, data: { id: salaryRef.id, ...salaryRecord, isUpdate: true } };
+    } else {
+      await setDoc(salaryRef, { id: salaryRef.id, ...salaryRecord });
+      return { success: true, data: { id: salaryRef.id, ...salaryRecord } };
+    }
+  } catch (error) {
+    console.error('Error calculating salary with attendance:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Calculate all pending salaries for a month
+ * @param {number} month - Month (1-12)
+ * @param {number} year - Year
+ * @param {string} calculatedBy - Calculator user ID
+ * @returns {Promise<Object>} Results of calculation
+ */
+export const calculateAllSalariesForMonth = async (month, year, calculatedBy) => {
+  try {
+    // Get all staff with base salary
+    const staffResult = await getAllStaffForAttendance();
+    if (!staffResult.success) {
+      return staffResult;
+    }
+    
+    const allStaff = staffResult.data;
+    const results = [];
+    const errors = [];
+    
+    for (const staff of allStaff) {
+      try {
+        const result = await calculateSalaryWithAttendance(staff.userId, month, year, calculatedBy);
+        if (result.success) {
+          results.push(result.data);
+        } else {
+          errors.push({ userId: staff.userId, name: staff.fullName, error: result.error });
+        }
+      } catch (error) {
+        errors.push({ userId: staff.userId, name: staff.fullName, error: error.message });
+      }
+    }
+    
+    // Log bulk calculation
+    await addDoc(collection(db, 'auditLogs'), {
+      userId: calculatedBy,
+      action: 'BULK_SALARY_CALCULATION',
+      month,
+      year,
+      totalCalculated: results.length,
+      totalErrors: errors.length,
+      timestamp: serverTimestamp()
+    });
+    
+    return { 
+      success: true, 
+      data: { 
+        calculated: results, 
+        errors,
+        total: allStaff.length,
+        successCount: results.length,
+        errorCount: errors.length
+      } 
+    };
+  } catch (error) {
+    console.error('Error calculating all salaries:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Get salary summary by department for a month
+ * @param {number} month - Month (1-12)
+ * @param {number} year - Year
+ * @returns {Promise<Object>} Department salary summary
+ */
+export const getDepartmentSalarySummary = async (month, year) => {
+  try {
+    const result = await getSalaryRecords({ month, year });
+    if (!result.success) {
+      return result;
+    }
+    
+    const records = result.data;
+    const summary = {};
+    
+    for (const record of records) {
+      const dept = record.userDepartment || 'Other';
+      if (!summary[dept]) {
+        summary[dept] = {
+          totalBaseSalary: 0,
+          totalCalculatedSalary: 0,
+          paidAmount: 0,
+          pendingAmount: 0,
+          staffCount: 0,
+          staffList: []
+        };
+      }
+      
+      summary[dept].totalBaseSalary += record.baseSalary || 0;
+      summary[dept].totalCalculatedSalary += record.calculatedSalary || 0;
+      
+      if (record.status === 'paid') {
+        summary[dept].paidAmount += record.calculatedSalary || 0;
+      } else {
+        summary[dept].pendingAmount += record.calculatedSalary || 0;
+      }
+      
+      summary[dept].staffCount++;
+      summary[dept].staffList.push({
+        id: record.userId,
+        name: record.userName,
+        role: record.userRole,
+        salary: record.calculatedSalary,
+        status: record.status,
+        workingDays: record.workingDays,
+        absentDays: record.absentDays
+      });
+    }
+    
+    return { success: true, data: summary };
+  } catch (error) {
+    console.error('Error getting department salary summary:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Get salary payment history for a user
+ * @param {string} userId - User ID
+ * @returns {Promise<Object>} Payment history
+ */
+export const getUserSalaryHistory = async (userId) => {
+  try {
+    const result = await getSalaryRecords({ userId });
+    if (!result.success) {
+      return result;
+    }
+    
+    const records = result.data;
+    const history = {
+      totalPaid: 0,
+      totalPending: 0,
+      totalCalculated: 0,
+      lastPaidDate: null,
+      records: records.map(r => ({
+        month: `${r.month}/${r.year}`,
+        baseSalary: r.baseSalary,
+        calculatedSalary: r.calculatedSalary,
+        status: r.status,
+        workingDays: r.workingDays,
+        absentDays: r.absentDays,
+        paidAt: r.paidAt?.toDate?.() || null,
+        paymentMethod: r.paymentMethod
+      }))
+    };
+    
+    for (const r of records) {
+      history.totalCalculated += r.calculatedSalary;
+      if (r.status === 'paid') {
+        history.totalPaid += r.calculatedSalary;
+        if (!history.lastPaidDate || (r.paidAt?.toDate?.() > history.lastPaidDate)) {
+          history.lastPaidDate = r.paidAt?.toDate?.() || null;
+        }
+      } else {
+        history.totalPending += r.calculatedSalary;
+      }
+    }
+    
+    return { success: true, data: history };
+  } catch (error) {
+    console.error('Error getting user salary history:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+/**
+ * Get previous salaries summary
+ * @param {number} userId - User ID (optional)
+ * @returns {Promise<Object>} Previous salaries summary
+ */
+export const getPreviousSalariesSummary = async (userId = null) => {
+  try {
+    let constraints = [orderBy('year', 'desc'), orderBy('month', 'desc')];
+    
+    if (userId) {
+      constraints.unshift(where('userId', '==', userId));
+    }
+    
+    const q = query(collection(db, 'salaryRecords'), ...constraints);
+    const snapshot = await getDocs(q);
+    
+    const salaries = [];
+    for (const doc of snapshot.docs) {
+      const record = doc.data();
+      salaries.push({
+        id: doc.id,
+        month: record.month,
+        year: record.year,
+        userName: record.userName,
+        userRole: record.userRole,
+        userDepartment: record.userDepartment,
+        baseSalary: record.baseSalary,
+        calculatedSalary: record.calculatedSalary,
+        status: record.status,
+        workingDays: record.workingDays,
+        paidAt: record.paidAt?.toDate?.() || null,
+        paymentMethod: record.paymentMethod
+      });
+    }
+    
+    return { success: true, data: salaries };
+  } catch (error) {
+    console.error('Error getting previous salaries:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// ==================== APPOINTMENT PAYMENT FUNCTIONS ====================
+
+/**
+ * Process appointment fee payment
+ * @param {string} appointmentId - Appointment ID
+ * @param {Object} paymentData - Payment data (method, proof, reference)
+ * @param {string} patientId - Patient ID
+ * @returns {Promise<Object>} Success status
+ */
+export const processAppointmentPayment = async (appointmentId, paymentData, patientId) => {
+  try {
+    if (!appointmentId || !paymentData || !patientId) {
+      return { success: false, error: 'Missing required fields' };
+    }
+
+    const appointmentRef = doc(db, 'appointments', appointmentId);
+    const appointmentDoc = await getDoc(appointmentRef);
+    
+    if (!appointmentDoc.exists()) {
+      return { success: false, error: 'Appointment not found' };
+    }
+    
+    const appointment = appointmentDoc.data();
+    
+    if (appointment.patientId !== patientId) {
+      return { success: false, error: 'Unauthorized: This appointment does not belong to you' };
+    }
+    
+    if (appointment.paymentStatus === 'paid') {
+      return { success: false, error: 'Payment already processed for this appointment' };
+    }
+    
+    if (appointment.status !== 'approved') {
+      return { success: false, error: 'Appointment must be approved before payment' };
+    }
+    
+    // Compress payment proof if exists
+    let compressedProof = null;
+    if (paymentData.proof) {
+      compressedProof = compressData(paymentData.proof);
+    }
+    
+    // Update appointment with payment info (without transaction to avoid issues)
+    await updateDoc(appointmentRef, {
+      paymentStatus: 'paid',
+      paymentMethod: paymentData.method,
+      paymentReference: paymentData.reference,
+      paymentProof: compressedProof,
+      paidAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    
+    // Create invoice for this appointment payment
+    const invoiceRef = doc(collection(db, 'invoices'));
+    const invoice = {
+      id: invoiceRef.id,
+      patientId: patientId,
+      doctorId: appointment.doctorId,
+      appointmentId: appointmentId,
+      type: 'appointment_fee',
+      description: `Appointment fee for consultation with Dr. ${appointment.doctorName || 'Doctor'}`,
+      amount: appointment.paymentAmount || 0,
+      status: 'paid',
+      paymentMethod: paymentData.method,
+      paymentReference: paymentData.reference,
+      paidAt: serverTimestamp(),
+      createdAt: serverTimestamp(),
+      createdBy: patientId
+    };
+    
+    await setDoc(invoiceRef, invoice);
+    
+    // Update department revenue for accountant
+    if (appointment.departmentId) {
+      const deptRef = doc(db, 'departments', appointment.departmentId);
+      await updateDoc(deptRef, {
+        revenue: increment(appointment.paymentAmount || 0),
+        collectedRevenue: increment(appointment.paymentAmount || 0),
+        updatedAt: serverTimestamp()
+      });
+    }
+    
+    // Log payment
+    await addDoc(collection(db, 'auditLogs'), {
+      userId: patientId,
+      action: 'APPOINTMENT_PAID',
+      appointmentId,
+      amount: appointment.paymentAmount,
+      timestamp: serverTimestamp()
+    });
+    
+    // Notify receptionist
+    try {
+      const receptionists = await getUsersByRole('receptionist');
+      if (receptionists.success && receptionists.data && receptionists.data.length > 0) {
+        const batch = writeBatch(db);
+        receptionists.data.forEach(staff => {
+          if (staff && staff.id) {
+            const notifRef = doc(collection(db, 'notifications'));
+            batch.set(notifRef, {
+              userId: staff.id,
+              type: 'APPOINTMENT_PAID',
+              title: 'Appointment Fee Paid',
+              message: `Patient has paid appointment fee for Dr. ${appointment.doctorName || 'Doctor'}`,
+              appointmentId,
+              read: false,
+              timestamp: serverTimestamp()
+            });
+          }
+        });
+        await batch.commit();
+      }
+    } catch (notifError) {
+      console.error('Error notifying receptionists:', notifError);
+      // Don't fail the operation for notification errors
+    }
+    
+    return { success: true, data: { invoiceId: invoiceRef.id, appointmentId } };
+  } catch (error) {
+    console.error('Error processing appointment payment:', error);
+    return { success: false, error: error.message || 'Failed to process payment' };
+  }
+};
+
+export const getAppointmentPaymentReceipt = async (appointmentId) => {
+  try {
+    if (!appointmentId) {
+      return { success: false, error: 'Appointment ID is required' };
+    }
+
+    const appointmentRef = doc(db, 'appointments', appointmentId);
+    const appointmentDoc = await getDoc(appointmentRef);
+    
+    if (!appointmentDoc.exists()) {
+      return { success: false, error: 'Appointment not found' };
+    }
+    
+    const appointment = appointmentDoc.data();
+    
+    // Debug log
+    console.log('Receipt data from appointment:', {
+      doctorId: appointment.doctorId,
+      patientId: appointment.patientId,
+      paymentMethod: appointment.paymentMethod,
+      paymentAmount: appointment.paymentAmount
+    });
+    
+    // Get doctor details with fallback
+    let doctorName = 'Unknown Doctor';
+    let doctorSpecialization = '';
+    try {
+      const doctorData = await getUserById(appointment.doctorId);
+      if (doctorData.success && doctorData.data) {
+        doctorName = doctorData.data.fullName || 'Unknown Doctor';
+        doctorSpecialization = doctorData.data.specialization || '';
+      }
+    } catch (doctorError) {
+      console.error('Error fetching doctor:', doctorError);
+    }
+    
+    // Get patient details with fallback
+    let patientName = 'Unknown Patient';
+    let patientPhone = '';
+    let patientEmail = '';
+    try {
+      const patientData = await getUserById(appointment.patientId);
+      if (patientData.success && patientData.data) {
+        patientName = patientData.data.fullName || 'Unknown Patient';
+        patientPhone = patientData.data.phone || '';
+        patientEmail = patientData.data.email || '';
+      }
+    } catch (patientError) {
+      console.error('Error fetching patient:', patientError);
+    }
+    
+    // Calculate amount
+    const amount = appointment.paymentAmount || appointment.consultationFee || 1000;
+    
+    const receipt = {
+      appointmentId: appointment.id,
+      appointmentIdShort: appointment.id?.slice(-8) || 'N/A',
+      patientName: patientName,
+      patientPhone: patientPhone,
+      patientEmail: patientEmail,
+      doctorName: doctorName,
+      doctorSpecialization: doctorSpecialization,
+      amount: amount,
+      paymentMethod: appointment.paymentMethod || 'Not specified',
+      paymentReference: appointment.paymentReference || 'N/A',
+      paidAt: appointment.paidAt?.toDate?.() || appointment.paidAt || null,
+      date: appointment.date || 'N/A',
+      time: appointment.time || 'N/A',
+      challanNo: `APT-${(appointment.id?.slice(-8) || 'N/A')}`,
+      status: appointment.paymentStatus || 'pending',
+      reason: appointment.reason || 'Consultation',
+      department: appointment.department || 'General'
+    };
+    
+    return { success: true, data: receipt };
+  } catch (error) {
+    console.error('Error getting payment receipt:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+export const verifyAndAssignAppointment = async (appointmentId, receptionistId) => {
+    try {
+    // Log the received parameters
+    console.log('verifyAndAssignAppointment called with:', { appointmentId, receptionistId });
+    
+    if (!appointmentId) {
+      return { success: false, error: 'Missing required fields: appointmentId is required' };
+    }
+    
+    if (!receptionistId) {
+      return { success: false, error: 'Missing required fields: receptionistId is required' };
+    }
+
+    const appointmentRef = doc(db, 'appointments', appointmentId);
+    const appointmentDoc = await getDoc(appointmentRef);
+    
+    if (!appointmentDoc.exists()) {
+      return { success: false, error: 'Appointment not found' };
+    }
+    
+    const appointment = appointmentDoc.data();
+    
+    // Log the appointment data
+    console.log('Appointment data:', {
+      id: appointmentId,
+      paymentStatus: appointment.paymentStatus,
+      hasPaymentProof: !!appointment.paymentProof,
+      doctorId: appointment.doctorId,
+      patientId: appointment.patientId
+    });
+    
+    // Check if payment has been made
+    if (appointment.paymentStatus !== 'paid') {
+      return { success: false, error: `Payment not yet made by patient. Current status: ${appointment.paymentStatus}` };
+    }
+    
+    // Verify payment proof exists
+    if (!appointment.paymentProof) {
+      return { success: false, error: 'Payment proof not uploaded by patient' };
+    }
+    
+    // Calculate payment amount - try multiple sources
+    const paymentAmount = appointment.paymentAmount || appointment.consultationFee || 1000;
+    
+    // Update appointment to confirmed - ready for doctor
+    await updateDoc(appointmentRef, {
+      status: 'confirmed',
+      paymentVerified: true,
+      verifiedBy: receptionistId,
+      verifiedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    
+    // Get doctor and patient details
+    const [doctorData, patientData] = await Promise.all([
+      getUserById(appointment.doctorId),
+      getUserById(appointment.patientId)
+    ]);
+    
+    const doctorName = doctorData.success ? doctorData.data.fullName : 'Doctor';
+    const doctorEmail = doctorData.success ? doctorData.data.email : '';
+    const patientName = patientData.success ? patientData.data.fullName : 'Patient';
+    const patientEmail = patientData.success ? patientData.data.email : '';
+    
+    // Safe format currency function
+    const safeFormatCurrency = (amount) => {
+      try {
+        return new Intl.NumberFormat('en-PK', {
+          style: 'currency',
+          currency: 'PKR',
+          minimumFractionDigits: 0,
+          maximumFractionDigits: 0
+        }).format(amount || 0);
+      // eslint-disable-next-line no-unused-vars
+      } catch (e) {
+        return `PKR ${(amount || 0).toLocaleString()}`;
+      }
+    };
+    
+    // Create permanent chat between doctor and patient (only if not exists)
+    try {
+      console.log('Creating chat for doctor:', appointment.doctorId, 'patient:', appointment.patientId);
+      const chatResult = await createOrGetChat(appointment.doctorId, appointment.patientId);
+      if (chatResult.success && chatResult.isNew) {
+        console.log('New permanent chat created between doctor and patient after payment');
+      } else if (chatResult.success) {
+        console.log('Existing chat found between doctor and patient');
+      } else {
+        console.warn('Chat creation failed:', chatResult.error);
+      }
+    } catch (chatError) {
+      console.error('Error in chat creation (non-blocking):', chatError);
+    }
+    
+    // Create invoice for this appointment
+    let invoiceId = null;
+    try {
+      const invoiceRef = doc(collection(db, 'invoices'));
+      const invoice = {
+        id: invoiceRef.id,
+        patientId: appointment.patientId,
+        patientEmail: patientEmail,
+        patientName: patientName,
+        doctorId: appointment.doctorId,
+        doctorName: doctorName,
+        doctorEmail: doctorEmail,
+        appointmentId: appointmentId,
+        type: 'appointment_fee',
+        description: `Consultation fee for Dr. ${doctorName}`,
+        amount: paymentAmount,
+        status: 'paid',
+        paymentMethod: appointment.paymentMethod || 'cash',
+        paymentReference: appointment.paymentReference || `PAY-${appointmentId.slice(-8)}`,
+        paidAt: appointment.paidAt || serverTimestamp(),
+        appointmentDate: appointment.date,
+        appointmentTime: appointment.time,
+        createdAt: serverTimestamp(),
+        createdBy: receptionistId,
+        challanNo: `APT-${appointmentId.slice(-8)}`
+      };
+      await setDoc(invoiceRef, invoice);
+      invoiceId = invoiceRef.id;
+      console.log('Invoice created:', invoiceId);
+    } catch (invoiceError) {
+      console.error('Error creating invoice:', invoiceError);
+    }
+    
+    // Update department revenue for accountant
+    if (appointment.departmentId) {
+      try {
+        const deptRef = doc(db, 'departments', appointment.departmentId);
+        await updateDoc(deptRef, {
+          revenue: increment(paymentAmount),
+          collectedRevenue: increment(paymentAmount),
+          updatedAt: serverTimestamp()
+        });
+      } catch (deptError) {
+        console.error('Error updating department revenue:', deptError);
+      }
+    }
+    
+    // Notify doctor that appointment is confirmed and paid
+    try {
+      await addDoc(collection(db, 'notifications'), {
+        userId: appointment.doctorId,
+        type: 'APPOINTMENT_CONFIRMED',
+        title: 'Appointment Confirmed (Paid)',
+        message: `Appointment with ${patientName} on ${appointment.date} at ${appointment.time} has been confirmed. Payment of ${safeFormatCurrency(paymentAmount)} received. You can now chat with the patient.`,
+        appointmentId,
+        patientId: appointment.patientId,
+        patientName: patientName,
+        read: false,
+        timestamp: serverTimestamp(),
+        priority: appointment.isEmergency ? 'high' : 'normal'
+      });
+    } catch (notifError) {
+      console.error('Error notifying doctor:', notifError);
+    }
+    
+    // Notify patient that appointment is confirmed
+    try {
+      await addDoc(collection(db, 'notifications'), {
+        userId: appointment.patientId,
+        type: 'APPOINTMENT_CONFIRMED',
+        title: 'Appointment Confirmed',
+        message: `Your appointment with Dr. ${doctorName} on ${appointment.date} at ${appointment.time} has been confirmed. Payment verified. You can now chat with your doctor.`,
+        appointmentId,
+        doctorId: appointment.doctorId,
+        doctorName: doctorName,
+        read: false,
+        timestamp: serverTimestamp(),
+        invoiceId: invoiceId
+      });
+    } catch (notifError) {
+      console.error('Error notifying patient:', notifError);
+    }
+    
+    // Log confirmation
+    try {
+      await addDoc(collection(db, 'auditLogs'), {
+        userId: receptionistId,
+        action: 'APPOINTMENT_CONFIRMED',
+        targetId: appointmentId,
+        patientId: appointment.patientId,
+        doctorId: appointment.doctorId,
+        paymentAmount: paymentAmount,
+        timestamp: serverTimestamp()
+      });
+    } catch (logError) {
+      console.error('Error logging confirmation:', logError);
+    }
+    
+    return { success: true, data: { appointmentId, invoiceId, paymentAmount } };
+  } catch (error) {
+    console.error('Error verifying and assigning appointment:', error);
+    return { success: false, error: error.message || 'Failed to verify payment' };
+  }
+};
+
+/**
+ * Reject appointment payment (receptionist action)
+ * @param {string} appointmentId - Appointment ID
+ * @param {string} reason - Rejection reason
+ * @param {string} rejectedBy - Receptionist ID
+ * @returns {Promise<Object>} Success status
+ */
+export const rejectAppointmentPayment = async (appointmentId, reason, rejectedBy) => {
+  try {
+    if (!appointmentId || !reason || !rejectedBy) {
+      return { success: false, error: 'Missing required fields' };
+    }
+
+    const appointmentRef = doc(db, 'appointments', appointmentId);
+    const appointmentDoc = await getDoc(appointmentRef);
+
+    if (!appointmentDoc.exists()) {
+      return { success: false, error: 'Appointment not found' };
+    }
+
+    const appointment = appointmentDoc.data();
+
+    // Reset payment status back to pending
+    await updateDoc(appointmentRef, {
+      paymentStatus: 'pending',
+      paymentRejectionReason: reason,
+      paymentRejectedAt: serverTimestamp(),
+      paymentRejectedBy: rejectedBy,
+      paymentProof: null, // Clear the proof to allow re-upload
+      paymentReference: null,
+      updatedAt: serverTimestamp()
+    });
+
+    // Get doctor details
+    const doctorData = await getUserById(appointment.doctorId);
+    const doctorName = doctorData.success ? doctorData.data.fullName : 'Doctor';
+
+    // Notify patient about rejection
+    await addDoc(collection(db, 'notifications'), {
+      userId: appointment.patientId,
+      type: 'PAYMENT_REJECTED',
+      title: 'Payment Rejected',
+      message: `Your payment for appointment with Dr. ${doctorName} on ${appointment.date} at ${appointment.time} was rejected. Reason: ${reason}. Please make a new payment.`,
+      appointmentId,
+      read: false,
+      timestamp: serverTimestamp(),
+      priority: 'high'
+    });
+
+    // Log rejection
+    await addDoc(collection(db, 'auditLogs'), {
+      userId: rejectedBy,
+      action: 'PAYMENT_REJECTED',
+      targetId: appointmentId,
+      patientId: appointment.patientId,
+      doctorId: appointment.doctorId,
+      reason,
+      timestamp: serverTimestamp()
+    });
+
+    return { success: true };
+  } catch (error) {
+    console.error('Error rejecting payment:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+
+// Add this function to check if a patient has already rated a doctor
+export const hasPatientRatedDoctor = async (patientId, doctorId) => {
+  try {
+    if (!patientId || !doctorId) {
+      return { success: false, error: 'Missing required fields', hasRated: false };
+    }
+
+    const q = query(
+      collection(db, 'ratings'),
+      where('patientId', '==', patientId),
+      where('doctorId', '==', doctorId)
+    );
+
+    const snapshot = await getDocs(q);
+    
+    return { 
+      success: true, 
+      hasRated: !snapshot.empty,
+      rating: snapshot.empty ? null : { id: snapshot.docs[0].id, ...snapshot.docs[0].data() }
+    };
+  } catch (error) {
+    console.error('Error checking existing rating:', error);
+    return { success: false, error: error.message, hasRated: false };
   }
 };

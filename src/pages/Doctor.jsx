@@ -8,6 +8,7 @@ import {
   faUserInjured,
   faGraduationCap,
   faSpinner,
+  faCamera,
   faFlask,
   faMessage,
   faChartLine,
@@ -19,6 +20,7 @@ import {
   faClock,
   faCheckCircle,
   faHourglassHalf,
+  faUserCircle,
   faBell,
   faMoon,
   faSun,
@@ -58,12 +60,13 @@ import {
   getDoctorRatings,
   sendNotification,
   completeVisit,
-  getTodayDoctorAppointments,
   getAppointmentById,
   getAllDoctorAppointments,
   getDoctorAppointmentsByStatus,
   updateDoctorProfile,
-  getDoctorProfile
+  getDoctorProfile,
+  createOrGetChat,
+  getDoctorRatingsWithPatients
 } from '../database';
 import { 
   formatDate,
@@ -129,8 +132,16 @@ const Doctor = () => {
   
   // Chat state
   const [chatWith, setChatWith] = useState(null);
-  const [chatMessages] = useState({});
   const [unreadMessages, setUnreadMessages] = useState({});
+  // Add these near other useState declarations in Doctor.js (around line 100-150)
+// Ratings state
+const [ratingsData, setRatingsData] = useState([]);
+const [loadingRatings, setLoadingRatings] = useState(false);
+const [ratingStats, setRatingStats] = useState({
+  average: 0,
+  total: 0,
+  distribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }
+});
   
   // Profile settings
   const [showProfileSettings, setShowProfileSettings] = useState(false);
@@ -146,6 +157,7 @@ const Doctor = () => {
     languages: [],
     education: [],
     awards: [],
+    profileImage: null,
     clinicAddress: 'Main Hospital',
     availableDays: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
   });
@@ -200,33 +212,54 @@ const Doctor = () => {
     return result.success ? result.data : [];
   }, [currentUser?.uid]);
 
-  const fetchTodayAppointments = useCallback(async () => {
-    if (!currentUser?.uid) return [];
-    const result = await getTodayDoctorAppointments(currentUser.uid);
-    return result.success ? result.data : [];
-  }, [currentUser?.uid]);
+// Update the fetchUpcomingAppointments function to include confirmed status
+const fetchUpcomingAppointments = useCallback(async () => {
+  if (!currentUser?.uid) return [];
+  // Get approved, confirmed, and scheduled appointments
+  const approvedResult = await getDoctorAppointmentsByStatus(currentUser.uid, 'approved');
+  const confirmedResult = await getDoctorAppointmentsByStatus(currentUser.uid, 'confirmed');
+  const scheduledResult = await getDoctorAppointmentsByStatus(currentUser.uid, 'scheduled');
+  
+  const all = [
+    ...(approvedResult.success ? approvedResult.data : []),
+    ...(confirmedResult.success ? confirmedResult.data : []),
+    ...(scheduledResult.success ? scheduledResult.data : [])
+  ];
+  
+  // Filter out past appointments and sort by date
+  const today = new Date().toISOString().split('T')[0];
+  return all
+    .filter(apt => apt.date >= today && apt.status !== 'completed' && apt.status !== 'cancelled')
+    .sort((a, b) => {
+      const dateCompare = (a.date || '').localeCompare(b.date || '');
+      if (dateCompare !== 0) return dateCompare;
+      return (a.time || '').localeCompare(b.time || '');
+    });
+}, [currentUser?.uid]);
 
-  const fetchUpcomingAppointments = useCallback(async () => {
-    if (!currentUser?.uid) return [];
-    // Get all approved/scheduled appointments
-    const result = await getDoctorAppointmentsByStatus(currentUser.uid, 'approved');
-    const scheduledResult = await getDoctorAppointmentsByStatus(currentUser.uid, 'scheduled');
-    
-    const all = [
-      ...(result.success ? result.data : []),
-      ...(scheduledResult.success ? scheduledResult.data : [])
-    ];
-    
-    // Filter out past appointments and sort by date
-    const today = new Date().toISOString().split('T')[0];
-    return all
-      .filter(apt => apt.date >= today && apt.status !== 'completed')
-      .sort((a, b) => {
-        const dateCompare = (a.date || '').localeCompare(b.date || '');
-        if (dateCompare !== 0) return dateCompare;
-        return (a.time || '').localeCompare(b.time || '');
-      });
-  }, [currentUser?.uid]);
+// Update fetchTodayAppointments to include multiple statuses
+const fetchTodayAppointments = useCallback(async () => {
+  if (!currentUser?.uid) return [];
+  // Get today's appointments with statuses that matter for doctor
+  const today = new Date().toISOString().split('T')[0];
+  
+  const statuses = ['approved', 'confirmed', 'checked-in', 'in-progress'];
+  let allAppointments = [];
+  
+  for (const status of statuses) {
+    const result = await getDoctorAppointmentsByStatus(currentUser.uid, status);
+    if (result.success) {
+      allAppointments = [...allAppointments, ...result.data];
+    }
+  }
+  
+  // Filter for today and remove duplicates
+  const unique = allAppointments.filter((apt, index, self) => 
+    index === self.findIndex(a => a.id === apt.id) && apt.date === today
+  );
+  
+  return unique;
+}, [currentUser?.uid]);
 
   const fetchPastAppointments = useCallback(async () => {
     if (!currentUser?.uid) return [];
@@ -323,6 +356,7 @@ const Doctor = () => {
           languages: result.data.languages || [],
           education: result.data.education || [],
           awards: result.data.awards || [],
+          profileImage: result.data.profileImage || null, 
           clinicAddress: result.data.clinicAddress || 'Main Hospital',
           availableDays: result.data.availableDays || ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']
         });
@@ -353,6 +387,41 @@ const Doctor = () => {
 
     return () => clearInterval(interval);
   }, [currentUser?.uid, fetchNotifications, fetchUnreadCounts, fetchAllUnreadCounts]);
+
+  const loadRatings = useCallback(async () => {
+  if (!currentUser?.uid) return;
+  setLoadingRatings(true);
+  try {
+    const result = await getDoctorRatingsWithPatients(currentUser.uid);
+    if (result.success) {
+      setRatingsData(result.data);
+      
+      // Calculate stats
+      const total = result.data.length;
+      const sum = result.data.reduce((acc, r) => acc + (r.rating || 0), 0);
+      const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+      result.data.forEach(r => {
+        if (r.rating >= 1 && r.rating <= 5) distribution[r.rating]++;
+      });
+      
+      setRatingStats({
+        average: total > 0 ? sum / total : 0,
+        total,
+        distribution
+      });
+    }
+  } catch (error) {
+    console.error('Error loading ratings:', error);
+  } finally {
+    setLoadingRatings(false);
+  }
+}, [currentUser?.uid]);
+
+useEffect(() => {
+  if (activeTab === 'ratings') {
+    loadRatings();
+  }
+}, [activeTab, loadRatings]);
 
   // Load profile when settings modal opens
   useEffect(() => {
@@ -505,10 +574,68 @@ const Doctor = () => {
 
   // ==================== HANDLER FUNCTIONS ====================
 
-  const handleChatWithPatient = (patientId, patientName) => {
-    setChatWith({ id: patientId, fullName: patientName });
-    setShowChat(true);
+  // Profile image upload handler
+const handleProfileImageUpload = async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  // Validate file type
+  const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+  if (!allowedTypes.includes(file.type)) {
+    toast.error('Please upload an image file (JPEG, PNG, GIF, WEBP)');
+    return;
+  }
+
+  // Validate file size (2MB max for profile images)
+  if (file.size > 2 * 1024 * 1024) {
+    toast.error('Image size should be less than 2MB');
+    return;
+  }
+
+  // Convert to base64
+  const reader = new FileReader();
+  reader.readAsDataURL(file);
+  reader.onload = () => {
+    setProfileForm(prev => ({ ...prev, profileImage: reader.result }));
+    toast.success('Profile picture added');
   };
+  reader.onerror = (error) => {
+    console.error('Error converting image:', error);
+    toast.error('Failed to process image');
+  };
+};
+
+// Remove profile image handler
+const handleRemoveProfileImage = () => {
+  setProfileForm(prev => ({ ...prev, profileImage: null }));
+  toast.success('Profile picture removed');
+};
+
+// Update the handleChatWithPatient function to work with all relevant statuses
+const handleChatWithPatient = useCallback(async (patientId, patientName) => {
+  if (!currentUser?.uid || !patientId) {
+    toast.error('Cannot start chat: Missing user information');
+    return;
+  }
+  
+  // Chat should be available after payment confirmation
+  setLoading(true);
+  try {
+    const result = await createOrGetChat(currentUser.uid, patientId);
+    
+    if (result.success) {
+      setChatWith({ id: patientId, fullName: patientName });
+      setShowChat(true);
+    } else {
+      toast.error(result.error || 'Failed to start chat');
+    }
+  } catch (error) {
+    console.error('Error starting chat:', error);
+    toast.error('Failed to start chat');
+  } finally {
+    setLoading(false);
+  }
+}, [currentUser?.uid]);
 
   const handleProfileUpdate = async () => {
     setLoading(true);
@@ -535,78 +662,81 @@ const Doctor = () => {
     }
   };
 
-  const handleStartConsultation = async (appointment) => {
-    setLoading(true);
+const handleStartConsultation = async (appointment) => {
+  setLoading(true);
+  
+  try {
+    // Check if patient can be seen (status should be confirmed, checked-in, or approved)
+    const canStart = appointment.status === 'confirmed' || 
+                     appointment.status === 'checked-in' || 
+                     appointment.status === 'approved';
     
-    try {
-      // Check if there's already an active visit
-      const activeVisit = visits.find(v => 
-        v.patientId === appointment.patientId && v.status === 'active'
-      );
-      
-      if (activeVisit) {
-        setSelectedVisit(activeVisit);
-        setSelectedPatient({ 
-          id: appointment.patientId, 
-          fullName: appointment.patientName || appointment.patient?.fullName
-        });
-        setShowEMRForm(true);
-        toast.success('Continuing existing consultation');
-        setLoading(false);
-        return;
-      }
-
-      const visitData = {
-        patientId: appointment.patientId,
-        doctorId: currentUser.uid,
-        appointmentId: appointment.id,
-        department: appointment.department,
-        status: 'active',
-        vitals: {},
-        chiefComplaint: appointment.reason || '',
-        symptoms: '',
-        diagnosis: '',
-        notes: [],
-        icdCodes: [],
-        createdAt: new Date()
-      };
-
-      const result = await createVisit(visitData);
-      
-      if (result.success) {
-        setSelectedVisit(result.data);
-        setSelectedPatient({ 
-          id: appointment.patientId, 
-          fullName: appointment.patientName || appointment.patient?.fullName
-        });
-        setShowEMRForm(true);
-        toast.success('Consultation started');
-        
-        // Update appointments list
-        const updatedToday = appointments.today.map(apt => 
-          apt.id === appointment.id 
-            ? { ...apt, status: 'in-progress' } 
-            : apt
-        );
-        setAppointments(prev => ({ ...prev, today: updatedToday }));
-      } else {
-        toast.error(result.error);
-      }
-    } catch (error) {
-      console.error('Start consultation error:', error);
-      toast.error('Failed to start consultation');
-    } finally {
+    if (!canStart) {
+      toast.error('Patient must be confirmed before starting consultation');
       setLoading(false);
-    }
-  };
-
-  const handleStartConsultationFromCard = async (appointment) => {
-    if (appointment.status !== 'checked-in') {
-      toast.error('Patient must be checked in first');
       return;
     }
-    await handleStartConsultation(appointment);
-  };
+    
+    // Check if there's already an active visit
+    const activeVisit = visits.find(v => 
+      v.patientId === appointment.patientId && v.status === 'active'
+    );
+    
+    if (activeVisit) {
+      setSelectedVisit(activeVisit);
+      setSelectedPatient({ 
+        id: appointment.patientId, 
+        fullName: appointment.patientName || appointment.patient?.fullName
+      });
+      setShowEMRForm(true);
+      toast.success('Continuing existing consultation');
+      setLoading(false);
+      return;
+    }
+
+    const visitData = {
+      patientId: appointment.patientId,
+      doctorId: currentUser.uid,
+      appointmentId: appointment.id,
+      department: appointment.department,
+      status: 'active',
+      vitals: {},
+      chiefComplaint: appointment.reason || '',
+      symptoms: '',
+      diagnosis: '',
+      notes: [],
+      icdCodes: [],
+      createdAt: new Date()
+    };
+
+    const result = await createVisit(visitData);
+    
+    if (result.success) {
+      setSelectedVisit(result.data);
+      setSelectedPatient({ 
+        id: appointment.patientId, 
+        fullName: appointment.patientName || appointment.patient?.fullName
+      });
+      setShowEMRForm(true);
+      toast.success('Consultation started');
+      
+      // Update appointment status to in-progress
+      const updatedToday = appointments.today.map(apt => 
+        apt.id === appointment.id 
+          ? { ...apt, status: 'in-progress' } 
+          : apt
+      );
+      setAppointments(prev => ({ ...prev, today: updatedToday }));
+    } else {
+      toast.error(result.error);
+    }
+  } catch (error) {
+    console.error('Start consultation error:', error);
+    toast.error('Failed to start consultation');
+  } finally {
+    setLoading(false);
+  }
+};
 
   // Handle saving EMR
   const handleSaveEMR = async (emrData) => {
@@ -1100,6 +1230,7 @@ const Doctor = () => {
     { id: 'visits', label: 'Active Visits', icon: faFileMedical },
     { id: 'lab-requests', label: 'Lab Requests', icon: faFlask },
     { id: 'operations', label: 'Operations', icon: faStethoscope },
+     { id: 'ratings', label: 'Ratings & Reviews', icon: faStar },
     { id: 'chats', label: 'Chats', icon: faMessage }
   ];
 
@@ -1406,43 +1537,138 @@ const Doctor = () => {
     </div>
   );
 
-  // Render Appointments using AppointmentList component
-  const renderAppointments = () => {
-    // Combine all appointments and ensure they're properly formatted
-    const allAppointments = [
-      ...(appointments.today || []),
-      ...(appointments.upcoming || []),
-      ...(appointments.past || [])
-    ].filter(apt => apt && apt.id); // Remove any undefined/null appointments
 
-    // Remove duplicates by ID
-    const uniqueAppointments = allAppointments.reduce((acc, current) => {
-      const x = acc.find(item => item.id === current.id);
-      if (!x) {
-        return acc.concat([current]);
-      } else {
-        return acc;
-      }
-    }, []);
+const renderAppointments = () => {
+  // Combine all appointments from different categories
+  const allAppointments = [
+    ...(appointments.today || []),
+    ...(appointments.upcoming || []),
+    ...(appointments.past || [])
+  ].filter(apt => apt && apt.id);
 
-    console.log('Rendering appointments:', uniqueAppointments.length);
+  // Remove duplicates by ID
+  const uniqueAppointments = allAppointments.reduce((acc, current) => {
+    const exists = acc.find(item => item.id === current.id);
+    if (!exists) {
+      return [...acc, current];
+    }
+    return acc;
+  }, []);
 
-    return (
-      <AppointmentList
-        appointments={uniqueAppointments}
-        role="doctor"
-        title="All Appointments"
-        onViewDetails={handleViewAppointmentDetails}
-        onStartConsultation={handleStartConsultationFromCard}
-        onChatWithDoctor={handleChatWithPatient}
-        loading={loading}
-        showFilters={true}
-      />
+  // Ensure each appointment has required fields for AppointmentCard
+  const enrichedAppointments = uniqueAppointments.map(apt => ({
+    ...apt,
+    patientName: apt.patientName || apt.patient?.fullName || 'Unknown',
+    doctorName: apt.doctorName || userDetails?.fullName || 'Unknown',
+    doctorId: apt.doctorId || currentUser?.uid,
+    patientId: apt.patientId,
+    status: apt.status || 'pending',
+    paymentStatus: apt.paymentStatus || 'pending',
+    paymentAmount: apt.paymentAmount || apt.consultationFee || 1000,
+    isEmergency: apt.isEmergency || false,
+    date: apt.date,
+    time: apt.time,
+    reason: apt.reason || apt.chiefComplaint || '',
+    visitId: apt.visitId // Make sure visitId is passed
+  }));
+
+  console.log('Doctor appointments - enriched:', enrichedAppointments.map(a => ({ id: a.id, status: a.status, visitId: a.visitId })));
+
+  return (
+    <AppointmentList
+      appointments={enrichedAppointments}
+      role="doctor"
+      title="My Appointments"
+      onViewDetails={handleViewAppointmentDetails}
+      onChatWithDoctor={handleChatWithPatient}
+onMarkCompleted={async (appointmentId) => {
+  console.log('Mark completed called for appointment:', appointmentId);
+  // Find the appointment to get patient info
+  const apt = enrichedAppointments.find(a => a.id === appointmentId);
+  
+  if (!apt) {
+    toast.error('Appointment not found');
+    return;
+  }
+
+  setLoading(true);
+  try {
+    // Import the updateAppointmentStatus function from database
+    const { updateAppointmentStatus, completeVisit } = await import('../database');
+    
+    // Check if there's an active visit
+    const activeVisit = visits.find(v => 
+      v.patientId === apt.patientId && v.status === 'active'
     );
-  };
+    
+    if (activeVisit) {
+      // If there's an active visit, complete it
+      await completeVisit(activeVisit.id, currentUser.uid);
+      toast.success('Visit completed successfully!');
+    } else {
+      // If no active visit, just update appointment status to completed
+      const result = await updateAppointmentStatus(apt.id, 'completed', currentUser.uid);
+      if (result.success) {
+        toast.success('Appointment marked as completed');
+      } else {
+        toast.error(result.error || 'Failed to complete appointment');
+      }
+    }
+    
+    // Refresh all data
+    await Promise.all([
+      fetchTodayAppointments(),
+      fetchUpcomingAppointments(),
+      fetchVisits(),
+      fetchPatients()
+    ]);
+    
+    // Refresh the appointments list for the current tab
+    if (activeTab === 'appointments') {
+      const [all, today, upcoming, past] = await Promise.allSettled([
+        fetchAllAppointments(),
+        fetchTodayAppointments(),
+        fetchUpcomingAppointments(),
+        fetchPastAppointments()
+      ]);
+      
+      setAppointments({
+        today: today.status === 'fulfilled' ? today.value : [],
+        upcoming: upcoming.status === 'fulfilled' ? upcoming.value : [],
+        past: past.status === 'fulfilled' ? past.value : [],
+        all: all.status === 'fulfilled' ? all.value : []
+      });
+    }
+    
+  } catch (error) {
+    console.error('Error completing appointment:', error);
+    toast.error('Failed to complete appointment');
+  } finally {
+    setLoading(false);
+  }
+}}
+      loading={loading}
+      showFilters={true}
+    />
+  );
+};
 
-  // Render Patients
-  const renderPatients = () => (
+// Update renderPatients in Doctor.js
+const renderPatients = () => {
+  // Ensure patients data is loaded properly
+  const filteredPatients = searchQuery 
+    ? patients.filter(p => 
+        p.fullName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        p.phone?.includes(searchQuery) ||
+        p.email?.toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : patients;
+
+  if (loading) {
+    return <div className="flex justify-center py-12"><FontAwesomeIcon icon={faSpinner} className="animate-spin text-2xl" /></div>;
+  }
+
+  return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h2 className="text-2xl font-bold text-gray-900 dark:text-white">My Patients</h2>
@@ -1456,80 +1682,74 @@ const Doctor = () => {
         </div>
       </div>
 
-      {patients.length === 0 ? (
+      {!patients || patients.length === 0 ? (
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center">
           <FontAwesomeIcon icon={faUsers} className="h-16 w-16 text-gray-400 mb-4" />
           <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">No Patients Yet</h3>
           <p className="text-gray-600 dark:text-gray-400">
-            Your patients will appear here after consultations.
+            Your patients will appear here after they have completed appointments with you.
           </p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {patients
-            .filter(patient => 
-              !searchQuery || 
-              patient.fullName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-              patient.phone?.includes(searchQuery) ||
-              patient.cnic?.includes(searchQuery)
-            )
-            .map((patient) => (
-              <div key={patient.id} className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden hover:shadow-lg transition">
-                <div className="p-6">
-                  <div className="flex items-center mb-4">
-                    <div className="w-16 h-16 bg-gradient-to-br from-teal-400 to-teal-600 rounded-full flex items-center justify-center text-white font-bold text-xl">
-                      {patient.fullName?.charAt(0)}
-                    </div>
-                    <div className="ml-4">
-                      <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{patient.fullName}</h3>
-                      <p className="text-sm text-gray-600 dark:text-gray-400">
-                        Age: {patient.age || 'N/A'} • {patient.bloodGroup || 'N/A'}
-                      </p>
-                    </div>
+          {filteredPatients.map((patient) => (
+            <div key={patient.id} className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden hover:shadow-lg transition">
+              <div className="p-6">
+                <div className="flex items-center mb-4">
+                  <div className="w-16 h-16 bg-gradient-to-br from-teal-400 to-teal-600 rounded-full flex items-center justify-center text-white font-bold text-xl">
+                    {patient.fullName?.charAt(0) || 'P'}
                   </div>
-                  
-                  <div className="space-y-2 mb-4">
+                  <div className="ml-4">
+                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{patient.fullName || 'Unknown'}</h3>
                     <p className="text-sm text-gray-600 dark:text-gray-400">
-                      <FontAwesomeIcon icon={faPhone} className="mr-2 h-3 w-3" />
-                      {patient.phone || 'N/A'}
+                      Age: {patient.age || 'N/A'} • {patient.bloodGroup || 'N/A'}
                     </p>
-                    <p className="text-sm text-gray-600 dark:text-gray-400">
-                      <FontAwesomeIcon icon={faHistory} className="mr-2 h-3 w-3" />
-                      Last Visit: {patient.lastVisit ? formatDate(patient.lastVisit) : 'No visits yet'}
-                    </p>
-                    <p className="text-sm text-gray-600 dark:text-gray-400">
-                      <FontAwesomeIcon icon={faFileMedical} className="mr-2 h-3 w-3" />
-                      Total Visits: {patient.visitCount || 0}
-                    </p>
-                  </div>
-
-                  <div className="flex space-x-2">
-                    <button
-                      onClick={() => loadPatientHistory(patient.id)}
-                      className="flex-1 px-3 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition text-sm"
-                    >
-                      View History
-                    </button>
-                    <button
-                      onClick={() => handleChatWithPatient(patient.id, patient.fullName)}
-                      className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition relative"
-                      title="Chat with patient"
-                    >
-                      <FontAwesomeIcon icon={faMessage} />
-                      {unreadMessages[patient.id] > 0 && (
-                        <span className="absolute -top-1 -right-1 bg-red-600 text-white text-xs rounded-full h-4 w-4 flex items-center justify-center">
-                          {unreadMessages[patient.id]}
-                        </span>
-                      )}
-                    </button>
                   </div>
                 </div>
+                
+                <div className="space-y-2 mb-4">
+                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                    <FontAwesomeIcon icon={faPhone} className="mr-2 h-3 w-3" />
+                    {patient.phone || 'N/A'}
+                  </p>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                    <FontAwesomeIcon icon={faHistory} className="mr-2 h-3 w-3" />
+                    Last Visit: {patient.lastVisit ? formatDate(patient.lastVisit) : 'No visits yet'}
+                  </p>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                    <FontAwesomeIcon icon={faFileMedical} className="mr-2 h-3 w-3" />
+                    Total Visits: {patient.visitCount || 0}
+                  </p>
+                </div>
+
+                <div className="flex space-x-2">
+                  <button
+                    onClick={() => loadPatientHistory(patient.id)}
+                    className="flex-1 px-3 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition text-sm"
+                  >
+                    View History
+                  </button>
+                  <button
+                    onClick={() => handleChatWithPatient(patient.id, patient.fullName)}
+                    className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition relative"
+                    title="Chat with patient"
+                  >
+                    <FontAwesomeIcon icon={faMessage} />
+                    {unreadMessages[patient.id] > 0 && (
+                      <span className="absolute -top-1 -right-1 bg-red-600 text-white text-xs rounded-full h-4 w-4 flex items-center justify-center">
+                        {unreadMessages[patient.id]}
+                      </span>
+                    )}
+                  </button>
+                </div>
               </div>
-            ))}
+            </div>
+          ))}
         </div>
       )}
     </div>
   );
+};
 
   // Render Visits
   const renderVisits = () => (
@@ -1887,84 +2107,240 @@ const Doctor = () => {
     </div>
   );
 
-  // Render Chats tab
-  const renderChats = () => {
-    // Get unique patients with whom the doctor has had appointments
-    const chatPatients = patients.filter(p => 
-      appointments.all?.some(apt => 
-        apt.patientId === p.id && 
-        (apt.status === 'approved' || apt.status === 'checked-in' || apt.status === 'completed')
-      )
-    );
-
+const renderRatings = () => {
+  if (loadingRatings) {
     return (
-      <div className="space-y-6">
-        <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Active Chats</h2>
-
-        {chatPatients.length === 0 ? (
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center">
-            <FontAwesomeIcon icon={faMessage} className="h-16 w-16 text-gray-400 mb-4" />
-            <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">No Active Chats</h3>
-            <p className="text-gray-600 dark:text-gray-400">
-              Your chats with patients will appear here once you have approved appointments.
-            </p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {chatPatients.map((patient) => (
-              <div key={patient.id} className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden hover:shadow-lg transition">
-                <div className="p-6">
-                  <div className="flex items-center mb-4">
-                    <div className="w-16 h-16 bg-gradient-to-br from-green-400 to-green-600 rounded-full flex items-center justify-center text-white font-bold text-xl relative">
-                      {patient.fullName?.charAt(0)}
-                      {unreadMessages[patient.id] > 0 && (
-                        <span className="absolute -top-1 -right-1 bg-red-600 text-white text-xs rounded-full h-6 w-6 flex items-center justify-center animate-pulse">
-                          {unreadMessages[patient.id]}
-                        </span>
-                      )}
-                    </div>
-                    <div className="ml-4">
-                      <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{patient.fullName}</h3>
-                      <p className="text-sm text-gray-600 dark:text-gray-400">
-                        Last message: {chatMessages[patient.id] ? formatDate(chatMessages[patient.id].timestamp) : 'No messages yet'}
-                      </p>
-                    </div>
-                  </div>
-                  
-                  <div className="flex space-x-2">
-                    <button
-                      onClick={() => handleChatWithPatient(patient.id, patient.fullName)}
-                      className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm font-medium"
-                    >
-                      <FontAwesomeIcon icon={faMessage} className="mr-2" />
-                      Open Chat
-                      {unreadMessages[patient.id] > 0 && (
-                        <span className="ml-2 bg-white text-green-600 px-2 py-0.5 rounded-full text-xs">
-                          {unreadMessages[patient.id]} new
-                        </span>
-                      )}
-                    </button>
-                    <button
-                      onClick={() => {
-                        const patientAppointments = appointments.all?.filter(apt => apt.patientId === patient.id);
-                        if (patientAppointments && patientAppointments.length > 0) {
-                          handleViewAppointmentDetails(patientAppointments[0]);
-                        }
-                      }}
-                      className="px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition"
-                      title="View Appointment"
-                    >
-                      <FontAwesomeIcon icon={faEye} />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+      <div className="flex justify-center py-12">
+        <FontAwesomeIcon icon={faSpinner} className="animate-spin text-2xl" />
       </div>
     );
-  };
+  }
+
+  return (
+    <div className="space-y-6">
+      <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Patient Reviews & Ratings</h2>
+
+      {/* Rating Summary Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 text-center">
+          <p className="text-sm text-gray-600 dark:text-gray-400">Overall Rating</p>
+          <div className="flex items-center justify-center mt-2">
+            <span className="text-4xl font-bold text-gray-900 dark:text-white">
+              {ratingStats.average.toFixed(1)}
+            </span>
+            <span className="text-xl text-gray-500 ml-1">/5</span>
+          </div>
+          <div className="flex justify-center mt-2">
+            {[1, 2, 3, 4, 5].map(star => (
+              <FontAwesomeIcon
+                key={star}
+                icon={faStar}
+                className={`h-5 w-5 ${star <= Math.round(ratingStats.average) ? 'text-yellow-400' : 'text-gray-300'}`}
+              />
+            ))}
+          </div>
+          <p className="text-sm text-gray-500 mt-2">{ratingStats.total} reviews</p>
+        </div>
+
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 col-span-2">
+          <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Rating Distribution</p>
+          <div className="space-y-2">
+            {[5, 4, 3, 2, 1].map(star => {
+              const count = ratingStats.distribution[star] || 0;
+              const percentage = ratingStats.total > 0 ? (count / ratingStats.total) * 100 : 0;
+              return (
+                <div key={star} className="flex items-center gap-3">
+                  <div className="w-16 text-sm text-gray-600 dark:text-gray-400">{star} star</div>
+                  <div className="flex-1 h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                    <div className="h-full bg-yellow-400 rounded-full" style={{ width: `${percentage}%` }}></div>
+                  </div>
+                  <div className="w-16 text-sm text-gray-600 dark:text-gray-400">{count}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Reviews List */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
+        <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Patient Reviews</h3>
+        </div>
+        <div className="p-6 space-y-6">
+          {ratingsData.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">No ratings yet</div>
+          ) : (
+            ratingsData.map(rating => (
+              <div key={rating.id} className="border-b border-gray-100 dark:border-gray-700 pb-4 last:border-0">
+                <div className="flex justify-between items-start mb-2">
+                  <div className="flex items-center">
+                    <div className="w-10 h-10 bg-blue-100 dark:bg-blue-900 rounded-full flex items-center justify-center mr-3">
+                      <FontAwesomeIcon icon={faUserInjured} className="h-5 w-5 text-blue-600" />
+                    </div>
+                    <div>
+                      <p className="font-medium text-gray-900 dark:text-white">
+                        {rating.patientName || 'Anonymous'}
+                      </p>
+                      <p className="text-xs text-gray-500">{formatDate(rating.createdAt)}</p>
+                    </div>
+                  </div>
+                  <div className="flex">
+                    {[1, 2, 3, 4, 5].map(star => (
+                      <FontAwesomeIcon
+                        key={star}
+                        icon={faStar}
+                        className={`h-4 w-4 ${star <= rating.rating ? 'text-yellow-400' : 'text-gray-300'}`}
+                      />
+                    ))}
+                  </div>
+                </div>
+                {rating.review && (
+                  <p className="text-gray-700 dark:text-gray-300 ml-13 pl-13">{rating.review}</p>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// In Doctor.jsx, replace the renderChats function with:
+
+const renderChats = () => {
+  // Directly extract unique patients from appointments that have chat-eligible statuses
+  const chatEligibleStatuses = ['confirmed', 'checked-in', 'in-progress', 'completed'];
+  
+  // Extract patients from appointments
+  const patientsFromAppointments = appointments.all
+    .filter(apt => apt && apt.patientId && chatEligibleStatuses.includes(apt.status))
+    .map(apt => ({
+      id: apt.patientId,
+      fullName: apt.patientName || apt.patient?.fullName || 'Unknown Patient',
+      lastAppointment: apt.date,
+      status: apt.status
+    }));
+  
+  // Extract patients from visits (active visits)
+  const patientsFromVisits = visits
+    .filter(v => v && v.patientId && (v.status === 'active' || v.status === 'completed'))
+    .map(v => ({
+      id: v.patientId,
+      fullName: v.patientName || 'Unknown Patient',
+      lastVisit: v.createdAt
+    }));
+  
+  // Merge and deduplicate by ID, preferring names from appointments
+  const chatPatientsMap = new Map();
+  
+  // Add from appointments first (preferred source)
+  patientsFromAppointments.forEach(p => {
+    if (!chatPatientsMap.has(p.id)) {
+      chatPatientsMap.set(p.id, p);
+    }
+  });
+  
+  // Add from visits if not already present
+  patientsFromVisits.forEach(p => {
+    if (!chatPatientsMap.has(p.id)) {
+      chatPatientsMap.set(p.id, p);
+    }
+  });
+  
+  const allChatPatients = Array.from(chatPatientsMap.values());
+  
+  console.log('=== CHAT PATIENTS DEBUG ===');
+  console.log('Total appointments:', appointments.all?.length);
+  console.log('Appointments with eligible statuses:', patientsFromAppointments.length);
+  console.log('Patients from visits:', patientsFromVisits.length);
+  console.log('Unique chat patients found:', allChatPatients.length);
+  console.log('Chat patients list:', allChatPatients.map(p => ({ id: p.id, name: p.fullName })));
+  console.log('Appointment statuses:', appointments.all?.map(a => ({ id: a.id, status: a.status, patientName: a.patientName })));
+  console.log('Unread messages:', unreadMessages);
+  
+  if (allChatPatients.length === 0) {
+    return (
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center">
+        <FontAwesomeIcon icon={faMessage} className="h-16 w-16 text-gray-400 mb-4" />
+        <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">No Active Chats</h3>
+        <p className="text-gray-600 dark:text-gray-400">
+          Your chats with patients will appear here once appointments are confirmed and paid.
+        </p>
+        <div className="mt-4 p-3 bg-gray-100 dark:bg-gray-700 rounded-lg text-left text-sm">
+          <p className="font-medium mb-1">Debug Info:</p>
+          <p>Total Appointments: {appointments.all?.length || 0}</p>
+          <p>Appointment Statuses: {[...new Set(appointments.all?.map(a => a.status))].join(', ') || 'None'}</p>
+          <p>Active Visits: {visits.filter(v => v.status === 'active').length}</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Active Chats</h2>
+        <span className="text-sm text-gray-500">{allChatPatients.length} active conversation{allChatPatients.length !== 1 ? 's' : ''}</span>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {allChatPatients.map((patient) => (
+          <div key={patient.id} className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden hover:shadow-lg transition">
+            <div className="p-6">
+              <div className="flex items-center mb-4">
+                <div className="w-16 h-16 bg-gradient-to-br from-green-400 to-green-600 rounded-full flex items-center justify-center text-white font-bold text-xl relative">
+                  {patient.fullName?.charAt(0) || patient.fullName?.charAt(0) || 'P'}
+                  {unreadMessages && unreadMessages[patient.id] > 0 && (
+                    <span className="absolute -top-1 -right-1 bg-red-600 text-white text-xs rounded-full h-6 w-6 flex items-center justify-center animate-pulse">
+                      {unreadMessages[patient.id]}
+                    </span>
+                  )}
+                </div>
+                <div className="ml-4">
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{patient.fullName}</h3>
+                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                    {patient.lastAppointment ? `Last appointment: ${patient.lastAppointment}` : 'Active patient'}
+                  </p>
+                </div>
+              </div>
+              
+              <div className="flex space-x-2">
+                <button
+                  onClick={() => handleChatWithPatient(patient.id, patient.fullName)}
+                  className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm font-medium flex items-center justify-center"
+                >
+                  <FontAwesomeIcon icon={faMessage} className="mr-2" />
+                  Open Chat
+                  {unreadMessages && unreadMessages[patient.id] > 0 && (
+                    <span className="ml-2 bg-white text-green-600 px-2 py-0.5 rounded-full text-xs">
+                      {unreadMessages[patient.id]} new
+                    </span>
+                  )}
+                </button>
+                <button
+                  onClick={() => {
+                    const patientAppointment = appointments.all?.find(apt => apt.patientId === patient.id);
+                    if (patientAppointment) {
+                      handleViewAppointmentDetails(patientAppointment);
+                    } else {
+                      toast.info('No recent appointment found');
+                    }
+                  }}
+                  className="px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition"
+                  title="View Appointment"
+                >
+                  <FontAwesomeIcon icon={faEye} />
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
 
   // Render Profile Settings Modal
   const renderProfileSettingsModal = () => {
@@ -1984,6 +2360,65 @@ const Doctor = () => {
           </div>
 
           <form onSubmit={(e) => { e.preventDefault(); handleProfileUpdate(); }} className="space-y-6">
+            {/* Profile Image Section */}
+<div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg">
+  <h4 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center">
+    <FontAwesomeIcon icon={faUserCircle} className="mr-2 text-teal-500" />
+    Profile Picture
+  </h4>
+  
+  <div className="flex flex-col items-center">
+    <div className="relative">
+      {/* Image Preview */}
+      <div className="w-32 h-32 rounded-full overflow-hidden bg-gray-100 dark:bg-gray-600 border-4 border-teal-500">
+        {profileForm.profileImage ? (
+          <img 
+            src={profileForm.profileImage} 
+            alt="Profile" 
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center">
+            <FontAwesomeIcon icon={faUserMd} className="h-16 w-16 text-gray-400" />
+          </div>
+        )}
+      </div>
+      
+      {/* Upload Button */}
+      <label 
+        htmlFor="doctor-profile-image-input"
+        className="absolute bottom-0 right-0 w-10 h-10 bg-teal-600 text-white rounded-full flex items-center justify-center cursor-pointer hover:bg-teal-700 transition shadow-lg"
+      >
+        <FontAwesomeIcon icon={faCamera} className="h-5 w-5" />
+        <input
+          id="doctor-profile-image-input"
+          type="file"
+          accept="image/jpeg,image/jpg,image/png,image/gif,image/webp"
+          onChange={handleProfileImageUpload}
+          className="hidden"
+        />
+      </label>
+
+      {/* Remove Image Button */}
+      {profileForm.profileImage && (
+        <button
+          type="button"
+          onClick={() => handleRemoveProfileImage()}
+          className="absolute top-0 right-0 w-8 h-8 bg-red-600 text-white rounded-full flex items-center justify-center hover:bg-red-700 transition shadow-lg"
+        >
+          <FontAwesomeIcon icon={faTimes} className="h-4 w-4" />
+        </button>
+      )}
+    </div>
+
+    <p className="text-sm text-gray-500 dark:text-gray-400 mt-3">
+      Upload profile picture (Optional)
+    </p>
+    <p className="text-xs text-gray-400 dark:text-gray-500">
+      Max size: 2MB. Allowed: JPG, PNG, GIF, WEBP
+    </p>
+  </div>
+</div>
             {/* Personal Information */}
             <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg">
               <h4 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center">
@@ -3306,6 +3741,7 @@ const Doctor = () => {
             {activeTab === 'visits' && renderVisits()}
             {activeTab === 'lab-requests' && renderLabRequests()}
             {activeTab === 'operations' && renderOperations()}
+            {activeTab === 'ratings' && renderRatings()}
             {activeTab === 'chats' && renderChats()}
           </>
         )}
@@ -3349,6 +3785,7 @@ const Doctor = () => {
           userRole="doctor"
           otherUserId={chatWith.id}
           otherUserName={chatWith.fullName}
+          otherUserProfileImage={chatWith.profileImage}
           onClose={() => {
             setShowChat(false);
             setChatWith(null);

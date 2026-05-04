@@ -315,25 +315,26 @@ const handleChatWithDoctor = (doctorId, doctorName) => {
   setActiveTab('chat');
 };
 
-  // Handle appointment cancellation
-  const handleCancelAppointment = async (appointmentId) => {
-    if (!window.confirm('Are you sure you want to cancel this appointment?')) {
-      return;
-    }
+// Fix handleCancelAppointment to refresh data properly
+const handleCancelAppointment = async (appointmentId) => {
+  if (!window.confirm('Are you sure you want to cancel this appointment?')) {
+    return;
+  }
 
-    const reason = prompt('Please provide a reason for cancellation (optional):');
-    
-    setLoading(true);
-    const result = await cancelAppointment(appointmentId, uid, reason || '');
-    
-    if (result?.success) {
-      toast.success('Appointment cancelled successfully');
-      fetchAppointments();
-    } else {
-      handleFirebaseError(result?.error);
-    }
-    setLoading(false);
-  };
+  const reason = prompt('Please provide a reason for cancellation (optional):');
+  
+  setLoading(true);
+  const result = await cancelAppointment(appointmentId, uid, reason || '');
+  
+  if (result?.success) {
+    toast.success('Appointment cancelled successfully');
+    await fetchAppointments();
+    await fetchDashboardData();
+  } else {
+    handleFirebaseError(result?.error);
+  }
+  setLoading(false);
+};
 
   // Handle rating submission
   const handleSubmitRating = async () => {
@@ -523,6 +524,31 @@ const handleChatWithDoctor = (doctorId, doctorName) => {
     }
     setLoading(false);
   };
+
+  const handlePaySuccess = async (appointmentId, paymentData) => {
+  setLoading(true);
+  try {
+    // Refresh appointments to show updated status
+    await fetchAppointments();
+    await fetchDashboardData();
+    toast.success('Payment submitted successfully! Waiting for verification.');
+  } catch (error) {
+    console.error('Error after payment:', error);
+  } finally {
+    setLoading(false);
+  }
+};
+const handleRateDoctor = async (ratingData) => {
+  setLoading(true);
+  try {
+    await fetchAppointments();
+    toast.success('Thank you for your feedback!');
+  } catch (error) {
+    console.error('Error after rating:', error);
+  } finally {
+    setLoading(false);
+  }
+};
 
   // Handle file upload for payment proof
   const handleFileUpload = (e) => {
@@ -846,8 +872,6 @@ const handleChatWithDoctor = (doctorId, doctorName) => {
             {activeTab === 'billing' && renderBilling()}
             {activeTab === 'history' && renderHealthHistory()}
             {activeTab === 'profile' && renderProfile()}
-// In Patient.jsx, replace the Chat component section (around line 830-840) with this:
-
 {activeTab === 'chat' && (
   <div className="h-full">
     {chatDoctor ? (
@@ -858,7 +882,6 @@ const handleChatWithDoctor = (doctorId, doctorName) => {
         otherUserName={`Dr. ${chatDoctor.fullName}`}
         onClose={() => {
           setChatDoctor(null);
-          setActiveTab('dashboard');
         }}
         onMessageRead={() => setUnreadCount(prev => Math.max(0, prev - 1))}
       />
@@ -867,42 +890,60 @@ const handleChatWithDoctor = (doctorId, doctorName) => {
         <FontAwesomeIcon icon={faMessage} className="h-16 w-16 text-gray-400 mb-4" />
         <h3 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">Select a Doctor to Chat</h3>
         <p className="text-gray-600 dark:text-gray-400 mb-6">
-          Choose a doctor from your appointments or approved consultations to start chatting.
+          Choose a doctor from your confirmed or completed appointments to start chatting.
         </p>
         
-        {/* Show list of approved appointments with doctors */}
+        {/* Show unique list of doctors from appointments - include MORE statuses */}
         <div className="max-w-md mx-auto">
           <h4 className="text-left font-medium text-gray-700 dark:text-gray-300 mb-3">Your Doctors</h4>
           <div className="space-y-3">
-            {appointments
-              .filter(apt => apt.status === 'approved' || apt.status === 'completed')
-              .map(apt => (
-                <button
-                  key={apt.id}
-                  onClick={() => {
-                    setChatDoctor({ 
-                      id: apt.doctorId, 
-                      fullName: apt.doctorName 
+            {(() => {
+              // Get unique doctors from appointments - include all active statuses
+              const uniqueDoctors = new Map();
+              appointments
+                .filter(apt => {
+                  // Include appointments that have progressed past pending
+                  const activeStatuses = ['approved', 'confirmed', 'checked-in', 'in-progress', 'completed'];
+                  return activeStatuses.includes(apt.status);
+                })
+                .forEach(apt => {
+                  if (apt.doctorId && !uniqueDoctors.has(apt.doctorId)) {
+                    uniqueDoctors.set(apt.doctorId, {
+                      id: apt.doctorId,
+                      name: apt.doctorName,
+                      specialization: apt.doctorSpecialization
                     });
-                  }}
-                  className="w-full flex items-center p-4 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition"
-                >
-                  <div className="w-10 h-10 bg-green-100 dark:bg-green-900 rounded-full flex items-center justify-center mr-3">
-                    <FontAwesomeIcon icon={faUserMd} className="h-5 w-5 text-green-600 dark:text-green-400" />
-                  </div>
-                  <div className="flex-1 text-left">
-                    <p className="font-medium text-gray-900 dark:text-white">Dr. {apt.doctorName}</p>
-                    <p className="text-sm text-gray-500 dark:text-gray-400">
-                      Last appointment: {apt.date}
-                    </p>
-                  </div>
-                  <FontAwesomeIcon icon={faComment} className="text-green-600 dark:text-green-400" />
-                </button>
-              ))}
+                  }
+                });
+              
+              const doctorsList = Array.from(uniqueDoctors.values());
+              console.log('Doctors available for chat:', doctorsList);
+              
+              return doctorsList;
+            })().map(doctor => (
+              <button
+                key={doctor.id}
+                onClick={() => {
+                  setChatDoctor({ id: doctor.id, fullName: doctor.name });
+                }}
+                className="w-full flex items-center p-4 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition text-left"
+              >
+                <div className="w-10 h-10 bg-green-100 dark:bg-green-900 rounded-full flex items-center justify-center mr-3">
+                  <FontAwesomeIcon icon={faUserMd} className="h-5 w-5 text-green-600 dark:text-green-400" />
+                </div>
+                <div className="flex-1">
+                  <p className="font-medium text-gray-900 dark:text-white">Dr. {doctor.name}</p>
+                  {doctor.specialization && (
+                    <p className="text-sm text-gray-500 dark:text-gray-400">{doctor.specialization}</p>
+                  )}
+                </div>
+                <FontAwesomeIcon icon={faComment} className="text-green-600 dark:text-green-400" />
+              </button>
+            ))}
             
-            {appointments.filter(apt => apt.status === 'approved' || apt.status === 'completed').length === 0 && (
+            {appointments.filter(apt => apt.status === 'approved' || apt.status === 'confirmed' || apt.status === 'checked-in' || apt.status === 'completed').length === 0 && (
               <p className="text-gray-500 dark:text-gray-400 py-4">
-                No doctors available for chat. Book an appointment and wait for approval.
+                No doctors available for chat. Once your appointment is confirmed (after payment), you can chat here.
               </p>
             )}
           </div>
@@ -1287,35 +1328,37 @@ const handleChatWithDoctor = (doctorId, doctorName) => {
     );
   }
 
-  // Render Appointments
-  function renderAppointments() {
-    return (
-      <div className="space-y-6">
-        <div className="flex justify-between items-center">
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-white">My Appointments</h2>
-          <button
-            onClick={() => setShowBooking(true)}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition flex items-center"
-          >
-            <FontAwesomeIcon icon={faCalendarPlus} className="mr-2" />
-            Book New Appointment
-          </button>
-        </div>
-
-        <AppointmentList
-          appointments={appointments}
-          role="patient"
-          onCancel={handleCancelAppointment}
-          onViewDetails={(appointment) => {
-            setSelectedAppointment(appointment);
-            setShowAppointmentDetails(true);
-          }}
-          onChatWithDoctor={handleChatWithDoctor} 
-          loading={loading}
-        />
+function renderAppointments () {
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-bold text-gray-900 dark:text-white">My Appointments</h2>
+        <button
+          onClick={() => setShowBooking(true)}
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition flex items-center"
+        >
+          <FontAwesomeIcon icon={faCalendarPlus} className="mr-2" />
+          Book New Appointment
+        </button>
       </div>
-    );
-  }
+
+      <AppointmentList
+        appointments={appointments}
+        role="patient"
+        onCancel={handleCancelAppointment}
+        onViewDetails={(appointment) => {
+          setSelectedAppointment(appointment);
+          setShowAppointmentDetails(true);
+        }}
+        onChatWithDoctor={handleChatWithDoctor}
+        onPaySuccess={handlePaySuccess}
+        onRateDoctor={handleRateDoctor}
+        loading={loading}
+        showFilters={true}
+      />
+    </div>
+  );
+};
 
   // Medical Records render
   function renderMedicalRecords() {

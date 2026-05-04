@@ -16,7 +16,10 @@ const AppointmentList = ({
   onCheckIn,
   onCancel,
   onViewDetails,
-  onChatWithDoctor, // Add this prop
+  onChatWithDoctor,
+  onPaySuccess,
+  onRateDoctor,
+  onMarkCompleted,
   loading = false,
   showFilters = true
 }) => {
@@ -24,7 +27,6 @@ const AppointmentList = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [sortBy, setSortBy] = useState('date');
 
-  // Inside the component, add:
   const isMounted = useRef(true);
 
   useEffect(() => {
@@ -34,10 +36,7 @@ const AppointmentList = ({
     };
   }, []);
 
-  // Remove the isMounted ref check from useMemo
   const filteredAppointments = useMemo(() => {
-    // Remove this line: if (!isMounted.current) return [];
-    
     let filtered = [...appointments];
 
     // Apply status filter
@@ -84,21 +83,27 @@ const AppointmentList = ({
     return filtered;
   }, [appointments, filter, searchTerm, sortBy, role]);
 
-  // Memoize stats calculation
   const stats = useMemo(() => {
     const getStatusCount = (status) => {
       return appointments.filter(apt => apt.status === status).length;
+    };
+
+    const getPaymentStatusCount = (paymentStatus) => {
+      return appointments.filter(apt => apt.paymentStatus === paymentStatus).length;
     };
 
     return {
       total: appointments.length,
       pending: getStatusCount('pending'),
       approved: getStatusCount('approved'),
+      confirmed: getStatusCount('confirmed'),
       checkedIn: getStatusCount('checked-in'),
       completed: getStatusCount('completed'),
       rejected: getStatusCount('rejected'),
       cancelled: getStatusCount('cancelled'),
-      emergency: appointments.filter(apt => apt.isEmergency).length
+      emergency: appointments.filter(apt => apt.isEmergency).length,
+      paymentPending: getPaymentStatusCount('pending'),
+      paymentPaid: getPaymentStatusCount('paid')
     };
   }, [appointments]);
 
@@ -113,7 +118,7 @@ const AppointmentList = ({
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex justify-between items-center">
+      <div className="flex justify-between items-center flex-wrap gap-3">
         <h2 className="text-2xl font-bold text-gray-900 dark:text-white">{title}</h2>
         {stats.emergency > 0 && (
           <div className="px-3 py-1 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 rounded-full text-sm font-semibold animate-pulse">
@@ -121,11 +126,16 @@ const AppointmentList = ({
             {stats.emergency} Emergency {stats.emergency === 1 ? 'Case' : 'Cases'}
           </div>
         )}
+        {stats.paymentPending > 0 && role === 'receptionist' && (
+          <div className="px-3 py-1 bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 rounded-full text-sm font-semibold">
+            {stats.paymentPending} Payment{stats.paymentPending !== 1 ? 's' : ''} Pending
+          </div>
+        )}
       </div>
 
       {/* Stats Cards */}
       {showFilters && (
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
           <button 
             className={`p-3 rounded-lg cursor-pointer transition ${
               filter === 'all' 
@@ -161,8 +171,19 @@ const AppointmentList = ({
           </button>
           <button 
             className={`p-3 rounded-lg cursor-pointer transition ${
-              filter === 'checked-in' 
+              filter === 'confirmed' 
                 ? 'bg-blue-600 text-white' 
+                : 'bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700'
+            }`} 
+            onClick={() => setFilter('confirmed')}
+          >
+            <p className="text-xs">Confirmed</p>
+            <p className="text-lg font-bold">{stats.confirmed}</p>
+          </button>
+          <button 
+            className={`p-3 rounded-lg cursor-pointer transition ${
+              filter === 'checked-in' 
+                ? 'bg-purple-600 text-white' 
                 : 'bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700'
             }`} 
             onClick={() => setFilter('checked-in')}
@@ -173,7 +194,7 @@ const AppointmentList = ({
           <button 
             className={`p-3 rounded-lg cursor-pointer transition ${
               filter === 'completed' 
-                ? 'bg-purple-600 text-white' 
+                ? 'bg-gray-600 text-white' 
                 : 'bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700'
             }`} 
             onClick={() => setFilter('completed')}
@@ -184,7 +205,7 @@ const AppointmentList = ({
           <button 
             className={`p-3 rounded-lg cursor-pointer transition ${
               filter === 'cancelled' 
-                ? 'bg-gray-600 text-white' 
+                ? 'bg-red-600 text-white' 
                 : 'bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700'
             }`} 
             onClick={() => setFilter('cancelled')}
@@ -195,7 +216,7 @@ const AppointmentList = ({
           <button 
             className={`p-3 rounded-lg cursor-pointer transition ${
               filter === 'rejected' 
-                ? 'bg-red-600 text-white' 
+                ? 'bg-orange-600 text-white' 
                 : 'bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700'
             }`} 
             onClick={() => setFilter('rejected')}
@@ -248,7 +269,10 @@ const AppointmentList = ({
               onCheckIn={onCheckIn}
               onCancel={onCancel}
               onViewDetails={onViewDetails}
-              onChatWithDoctor={onChatWithDoctor} // This prop is now defined
+              onChatWithDoctor={onChatWithDoctor}
+              onMarkCompleted={onMarkCompleted}
+              onPaySuccess={onPaySuccess}
+              onRateDoctor={onRateDoctor}
             />
           ))}
         </div>
