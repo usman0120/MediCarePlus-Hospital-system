@@ -331,12 +331,48 @@ const EMRForm = ({
     }
   };
 
-  // Handle download
-  const handleDownload = () => {
-    if (onDownload) {
-      onDownload(formData);
+const handleDownload = async () => {
+  if (onDownload) {
+    onDownload(formData);
+  } else {
+    // Prepare prescription data
+    const prescriptionData = {
+      doctorName: patient?.doctorName || 'Doctor',
+      licenseNumber: patient?.licenseNumber || 'N/A',
+      patientName: patient?.fullName || visit?.patientName,
+      patientAge: patient?.age,
+      patientWeight: formData.vitals?.weight,
+      diagnosis: formData.diagnosis,
+      medicines: formData.prescriptions.map(rx => ({
+        name: rx.medicineName,
+        dose: rx.dose,
+        frequency: rx.frequency,
+        duration: rx.duration,
+        instructions: rx.instructions
+      })),
+      notes: formData.notes?.map(n => n.text).join('\n'),
+      followUpDate: formData.followUpDate
+    };
+    
+    try {
+      const { generatePDF } = await import('../utils/helpers');
+      const pdfBase64 = await generatePDF('prescription', prescriptionData);
+      
+      if (pdfBase64) {
+        const link = document.createElement('a');
+        link.href = `data:application/pdf;base64,${pdfBase64}`;
+        link.download = `prescription-${new Date().toISOString().split('T')[0]}.pdf`;
+        link.click();
+        toast.success('Prescription downloaded');
+      } else {
+        toast.error('Failed to generate PDF');
+      }
+    } catch (error) {
+      console.error('Error downloading prescription:', error);
+      toast.error('Failed to download prescription');
     }
-  };
+  }
+};
 
   // Render tabs
   const tabs = [

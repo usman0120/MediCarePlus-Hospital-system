@@ -77,6 +77,8 @@ const SalaryCalculationModule = ({ onSalaryProcessed }) => {
   const [showReceiptModal, setShowReceiptModal] = useState(false);
   const [showHistoryModal, setShowHistoryModal] = useState(false);
   const [selectedHistoryUser, setSelectedHistoryUser] = useState(null);
+  const [accountBalance, setAccountBalance] = useState(0);
+const [processingPayment, setProcessingPayment] = useState(false);
   
   // State for stats
   const [stats, setStats] = useState({
@@ -111,6 +113,22 @@ const SalaryCalculationModule = ({ onSalaryProcessed }) => {
     { value: 'admin', label: 'Admin', icon: faUserTie }
   ];
   
+  const fetchAccountBalance = useCallback(async () => {
+  try {
+    const { db } = await import('../firebase');
+    const { doc, getDoc } = await import('firebase/firestore');
+    
+    const accountRef = doc(db, 'accounts', 'main');
+    const accountSnap = await getDoc(accountRef);
+    
+    if (accountSnap.exists()) {
+      setAccountBalance(accountSnap.data().balance || 0);
+    }
+  } catch (error) {
+    console.error('Error fetching account balance:', error);
+  }
+}, []);
+
   // Fetch all data
   const fetchAllData = useCallback(async () => {
     setLoading(true);
@@ -167,9 +185,10 @@ const SalaryCalculationModule = ({ onSalaryProcessed }) => {
     }
   }, [selectedMonth]);
   
-  useEffect(() => {
-    fetchAllData();
-  }, [fetchAllData]);
+useEffect(() => {
+  fetchAllData();
+  fetchAccountBalance();
+}, [fetchAllData, fetchAccountBalance]);
   
   // Handle month change
   const handleMonthChange = (date) => {
@@ -240,52 +259,69 @@ const SalaryCalculationModule = ({ onSalaryProcessed }) => {
     }
   };
   
-  // Process payment
-  const handleProcessPayment = async () => {
-    if (!selectedRecord) return;
+const handleProcessPayment = async () => {
+  if (!selectedRecord) return;
+  
+  // Check if account has sufficient balance
+  if (accountBalance < selectedRecord.calculatedSalary) {
+    toast.error(
+      <div>
+        <p className="font-medium">Insufficient Account Balance!</p>
+        <p className="text-sm mt-1">
+          Required: {formatCurrency(selectedRecord.calculatedSalary)}<br />
+          Available: {formatCurrency(accountBalance)}<br />
+          Please recharge the account first.
+        </p>
+      </div>,
+      { duration: 5000 }
+    );
+    return;
+  }
+  
+  setProcessingPayment(true);
+  try {
+    const result = await processSalaryPayment(
+      selectedRecord.id,
+      {
+        ...paymentData,
+        processedAt: new Date()
+      },
+      currentUser.uid
+    );
     
-    setProcessing(true);
-    try {
-      const result = await processSalaryPayment(
-        selectedRecord.id,
-        {
-          ...paymentData,
-          processedAt: new Date()
-        },
-        currentUser.uid
-      );
+    if (result.success) {
+      toast.success('Salary payment processed successfully');
       
-      if (result.success) {
-        toast.success('Salary payment processed successfully');
-        
-        // Generate receipt
-        const receiptResult = await generateSalarySlip(selectedRecord.id);
-        if (receiptResult.success) {
-          setReceiptPdf(receiptResult.data);
-        }
-        
-        await fetchAllData();
-        setShowPaymentModal(false);
-        setSelectedRecord(null);
-        setPaymentData({
-          paymentMethod: 'bank_transfer',
-          paymentReference: '',
-          notes: ''
-        });
-        
-        if (onSalaryProcessed) {
-          onSalaryProcessed(selectedRecord);
-        }
-      } else {
-        toast.error(result.error || 'Failed to process payment');
+      // Generate receipt
+      const receiptResult = await generateSalarySlip(selectedRecord.id);
+      if (receiptResult.success) {
+        setReceiptPdf(receiptResult.data);
       }
-    } catch (error) {
-      console.error('Error processing payment:', error);
-      toast.error('Failed to process payment');
-    } finally {
-      setProcessing(false);
+      
+      await fetchAllData();
+      await fetchAccountBalance(); // Refresh account balance
+      
+      setShowPaymentModal(false);
+      setSelectedRecord(null);
+      setPaymentData({
+        paymentMethod: 'bank_transfer',
+        paymentReference: '',
+        notes: ''
+      });
+      
+      if (onSalaryProcessed) {
+        onSalaryProcessed(selectedRecord);
+      }
+    } else {
+      toast.error(result.error || 'Failed to process payment');
     }
-  };
+  } catch (error) {
+    console.error('Error processing payment:', error);
+    toast.error('Failed to process payment');
+  } finally {
+    setProcessingPayment(false);
+  }
+};
   
 const handleShowReceipt = async (record) => {
   console.log('Generating receipt for record:', record);
@@ -1161,125 +1197,141 @@ const handleShowReceipt = async (record) => {
     </div>
   );
   
-  // Payment Modal
-  const renderPaymentModal = () => (
-    showPaymentModal && selectedRecord && (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-        <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-md w-full">
-          <div className="flex justify-between items-center mb-4">
-            <h3 className="text-xl font-semibold text-gray-900 dark:text-white">Process Salary Payment</h3>
+const renderPaymentModal = () => (
+  showPaymentModal && selectedRecord && (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-md w-full">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-xl font-semibold text-gray-900 dark:text-white">Process Salary Payment</h3>
+          <button
+            onClick={() => {
+              setShowPaymentModal(false);
+              setSelectedRecord(null);
+            }}
+            className="text-gray-500 hover:text-gray-700"
+          >
+            <FontAwesomeIcon icon={faTimesCircle} />
+          </button>
+        </div>
+        
+        <div className="space-y-4">
+          {/* Account Balance Warning */}
+          <div className={`p-3 rounded-lg ${accountBalance < selectedRecord.calculatedSalary ? 'bg-red-50 dark:bg-red-900/30 border border-red-200' : 'bg-green-50 dark:bg-green-900/30'}`}>
+            <div className="flex justify-between items-center">
+              <span className="text-sm font-medium">Account Balance:</span>
+              <span className={`font-bold ${accountBalance < selectedRecord.calculatedSalary ? 'text-red-600' : 'text-green-600'}`}>
+                {formatCurrency(accountBalance)}
+              </span>
+            </div>
+            <div className="flex justify-between items-center mt-1">
+              <span className="text-sm font-medium">Salary Amount:</span>
+              <span className="font-bold text-purple-600">{formatCurrency(selectedRecord.calculatedSalary)}</span>
+            </div>
+            {accountBalance < selectedRecord.calculatedSalary && (
+              <div className="mt-2 text-xs text-red-600 flex items-center">
+                <FontAwesomeIcon icon={faExclamationTriangle} className="mr-1" />
+                Insufficient balance. Please recharge the account first.
+              </div>
+            )}
+          </div>
+          
+          {/* Employee Info */}
+          <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg">
+            <p className="font-medium text-gray-900 dark:text-white">{selectedRecord.userName}</p>
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              {selectedRecord.userRole} • {selectedRecord.userDepartment}
+            </p>
+            <div className="grid grid-cols-3 gap-2 text-xs text-gray-500 mt-2">
+              <span>Working: {selectedRecord.workingDays} days</span>
+              <span>Absent: {selectedRecord.absentDays || 0}</span>
+              <span>Late: {selectedRecord.lateDays || 0}</span>
+            </div>
+          </div>
+          
+          {/* Payment Method */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+              Payment Method
+            </label>
+            <select
+              value={paymentData.paymentMethod}
+              onChange={(e) => setPaymentData({ ...paymentData, paymentMethod: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 dark:bg-gray-700 dark:text-white"
+            >
+              <option value="bank_transfer">🏦 Bank Transfer</option>
+              <option value="cash">💵 Cash</option>
+              <option value="check">📄 Check</option>
+              <option value="online">💳 Online Payment</option>
+            </select>
+          </div>
+          
+          {/* Payment Reference */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+              Payment Reference (Optional)
+            </label>
+            <input
+              type="text"
+              value={paymentData.paymentReference}
+              onChange={(e) => setPaymentData({ ...paymentData, paymentReference: e.target.value })}
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 dark:bg-gray-700 dark:text-white"
+              placeholder="Transaction ID, check number, etc."
+            />
+          </div>
+          
+          {/* Notes */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+              Notes
+            </label>
+            <textarea
+              value={paymentData.notes}
+              onChange={(e) => setPaymentData({ ...paymentData, notes: e.target.value })}
+              rows={2}
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 dark:bg-gray-700 dark:text-white"
+              placeholder="Additional notes..."
+            />
+          </div>
+          
+          {/* Action Buttons */}
+          <div className="flex justify-end space-x-3 pt-4">
             <button
               onClick={() => {
                 setShowPaymentModal(false);
                 setSelectedRecord(null);
+                setPaymentData({
+                  paymentMethod: 'bank_transfer',
+                  paymentReference: '',
+                  notes: ''
+                });
               }}
-              className="text-gray-500 hover:text-gray-700"
+              className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition"
             >
-              <FontAwesomeIcon icon={faTimesCircle} />
+              Cancel
             </button>
-          </div>
-          
-          <div className="space-y-4">
-            {/* Employee Info */}
-            <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg">
-              <p className="font-medium text-gray-900 dark:text-white">{selectedRecord.userName}</p>
-              <p className="text-sm text-gray-600 dark:text-gray-400">
-                {selectedRecord.userRole} • {selectedRecord.userDepartment}
-              </p>
-              <p className="text-2xl font-bold text-green-600 mt-2">
-                {formatCurrency(selectedRecord.calculatedSalary)}
-              </p>
-              <div className="grid grid-cols-3 gap-2 text-xs text-gray-500 mt-2">
-                <span>Working: {selectedRecord.workingDays} days</span>
-                <span>Absent: {selectedRecord.absentDays || 0}</span>
-                <span>Late: {selectedRecord.lateDays || 0}</span>
-              </div>
-            </div>
-            
-            {/* Payment Method */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Payment Method
-              </label>
-              <select
-                value={paymentData.paymentMethod}
-                onChange={(e) => setPaymentData({ ...paymentData, paymentMethod: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 dark:bg-gray-700 dark:text-white"
-              >
-                <option value="bank_transfer">🏦 Bank Transfer</option>
-                <option value="cash">💵 Cash</option>
-                <option value="check">📄 Check</option>
-                <option value="online">💳 Online Payment</option>
-              </select>
-            </div>
-            
-            {/* Payment Reference */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Payment Reference (Optional)
-              </label>
-              <input
-                type="text"
-                value={paymentData.paymentReference}
-                onChange={(e) => setPaymentData({ ...paymentData, paymentReference: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 dark:bg-gray-700 dark:text-white"
-                placeholder="Transaction ID, check number, etc."
-              />
-            </div>
-            
-            {/* Notes */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Notes
-              </label>
-              <textarea
-                value={paymentData.notes}
-                onChange={(e) => setPaymentData({ ...paymentData, notes: e.target.value })}
-                rows={2}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500 dark:bg-gray-700 dark:text-white"
-                placeholder="Additional notes..."
-              />
-            </div>
-            
-            {/* Action Buttons */}
-            <div className="flex justify-end space-x-3 pt-4">
-              <button
-                onClick={() => {
-                  setShowPaymentModal(false);
-                  setSelectedRecord(null);
-                  setPaymentData({
-                    paymentMethod: 'bank_transfer',
-                    paymentReference: '',
-                    notes: ''
-                  });
-                }}
-                className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleProcessPayment}
-                disabled={processing}
-                className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition disabled:opacity-50 flex items-center"
-              >
-                {processing ? (
-                  <>
-                    <FontAwesomeIcon icon={faSpinner} className="animate-spin mr-2" />
-                    Processing...
-                  </>
-                ) : (
-                  <>
-                    <FontAwesomeIcon icon={faMoneyCheck} className="mr-2" />
-                    Process Payment
-                  </>
-                )}
-              </button>
-            </div>
+            <button
+              onClick={handleProcessPayment}
+              disabled={processingPayment || accountBalance < selectedRecord.calculatedSalary}
+              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition disabled:opacity-50 flex items-center"
+            >
+              {processingPayment ? (
+                <>
+                  <FontAwesomeIcon icon={faSpinner} className="animate-spin mr-2" />
+                  Processing...
+                </>
+              ) : (
+                <>
+                  <FontAwesomeIcon icon={faMoneyCheck} className="mr-2" />
+                  Process Payment
+                </>
+              )}
+            </button>
           </div>
         </div>
       </div>
-    )
-  );
+    </div>
+  )
+);
   
   // Details Modal
   const renderDetailsModal = () => (

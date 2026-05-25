@@ -10,11 +10,9 @@ import {
   faFlask,
   faBuilding,
   faChartLine,
-  faCalendarAlt,
   faUserPlus,
   faUserClock,
   faExclamationTriangle,
-  faBed,
   faEdit,
   faMoneyCheck,
   faSpinner,
@@ -24,7 +22,6 @@ import {
   faSignOutAlt,
   faHistory,
   faDollarSign,
-  faChartBar,
   faCheckCircle,
   faTimesCircle,
   faEye,
@@ -58,13 +55,6 @@ import {
   createDepartment,
   getDepartments,
   
-  // Bed Management
-  getBedsByStatus,
-  
-  // Analytics & Reports
-  getRevenueAnalytics,
-  getFinancialSummary,
-  
   // Audit Logs
   getAuditLogsWithUserDetails,
   getAuditLogs,
@@ -72,14 +62,8 @@ import {
   // Alerts & Notifications
   getPendingAlerts,
   
-  // Operations
-  getOperations,
-  
   // Backup & Export
   exportCollection,
-  
-  // Pricing Controls
-  updatePricing,
   getPricingConfig,
   getHospitalHistory,
   exportFinancialReport,
@@ -94,10 +78,10 @@ import { Chart as ChartJS, ArcElement, Tooltip, Legend, CategoryScale, LinearSca
 import { Pie, Line, Bar } from 'react-chartjs-2';
 import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
-import BedGrid from '../components/BedGrid';
 import UserHistoryModal from '../components/UserHistoryModal';
+import PatientHistoryModal from '../components/PatientHistoryModal';
 import DepartmentDetailsModal from '../components/DepartmentDetailsModal';
-import PricingControlsModal from '../components/PricingControlsModal';
+import PricingApprovals from '../components/PricingApprovals';
 import HospitalHistoryModal from '../components/HospitalHistoryModal';
 import SupportMessages from '../components/SupportMessages';
 import DeactivationRequests from '../components/DeactivationRequests';
@@ -129,7 +113,6 @@ const Admin = () => {
   const [selectedUserId, setSelectedUserId] = useState(null);
   const [selectedUserName, setSelectedUserName] = useState('');
   const [selectedUserRole, setSelectedUserRole] = useState('');
-  const [showPricingModal, setShowPricingModal] = useState(false);
   const [showHospitalHistoryModal, setShowHospitalHistoryModal] = useState(false);
   const [hospitalHistory, setHospitalHistory] = useState(null);
   const [yearlyStats, setYearlyStats] = useState([]);
@@ -155,25 +138,25 @@ const [pendingDeactivationCount, setPendingDeactivationCount] = useState(0);
   });
   const [patients, setPatients] = useState([]);
   const [departments, setDepartments] = useState([]);
-  const [beds, setBeds] = useState([]);
   const [analytics, setAnalytics] = useState(null);
   const [auditLogs, setAuditLogs] = useState([]);
   const [alerts, setAlerts] = useState([]);
-  const [operations, setOperations] = useState([]);
-  const [pricingConfig, setPricingConfig] = useState(null);
+  const [, setPricingConfig] = useState(null);
   
   const [stats, setStats] = useState({
-    totalPatients: 0,
-    totalAppointments: 0,
-    totalRevenue: 0,
-    pendingPayments: 0,
-    totalStaff: 0,
-    activeStaff: 0,
-    lastYearRevenue: 0,
-    lastYearExpenses: 0,
-    lastYearProfit: 0,
-    revenueGrowth: 0
-  });
+  totalPatients: 0,
+  totalAppointments: 0,
+  totalRevenue: 0,
+  pendingPayments: 0,
+  totalStaff: 0,
+  activeStaff: 0,
+  totalExpenses: 0,
+  lastYearRevenue: 0,
+  lastYearExpenses: 0,
+  lastYearProfit: 0,
+  profitMargin: 0,
+  revenueGrowth: 0
+});
 
   // Form states
   const [formData, setFormData] = useState({
@@ -212,6 +195,26 @@ const [salaryStats, setSalaryStats] = useState({
   averageSalary: 0
 });
 
+const [showSalaryHistoryModal, setShowSalaryHistoryModal] = useState(false);
+const [selectedSalaryForHistory, setSelectedSalaryForHistory] = useState(null);
+const [showUpdateSalaryModal, setShowUpdateSalaryModal] = useState(false);
+const [selectedUpdateSalary, setSelectedUpdateSalary] = useState(null);
+const [updateSalaryData, setUpdateSalaryData] = useState({
+  baseSalary: '',
+  reason: ''
+});
+
+const [showPatientHistoryModal, setShowPatientHistoryModal] = useState(false);
+const [selectedPatientId, setSelectedPatientId] = useState(null);
+const [selectedPatientName, setSelectedPatientName] = useState('');
+
+// Add the handler function
+const handleViewPatientHistory = (patientId, patientName) => {
+  setSelectedPatientId(patientId);
+  setSelectedPatientName(patientName);
+  setShowPatientHistoryModal(true);
+};
+
   // ==================== DATA FETCHING FUNCTIONS ====================
 
   const fetchPendingDeactivationCount = useCallback(async () => {
@@ -247,54 +250,85 @@ const [salaryStats, setSalaryStats] = useState({
     }
   }, []);
 
-  const fetchAnalytics = useCallback(async () => {
-    try {
-      const result = await getRevenueAnalytics(dateRange.start, dateRange.end);
-      let currentTotal = 0;
+const fetchAnalytics = useCallback(async () => {
+  try {
+    // Fetch real financial data from Firebase instead of using getRevenueAnalytics
+    const { db } = await import('../firebase');
+    const { collection, query, where, getDocs } = await import('firebase/firestore');
+    // Get paid appointments for revenue calculation
+    const appointmentsQuery = query(
+      collection(db, 'appointments'),
+      where('paymentStatus', 'in', ['paid', 'confirmed'])
+    );
+    const appointmentsSnap = await getDocs(appointmentsQuery);
+    
+    let totalRevenue = 0;
+    const revenueByDepartment = {};
+    
+    for (const aptDoc of appointmentsSnap.docs) {
+      const apt = aptDoc.data();
+      let amount = apt.paymentAmount || apt.consultationFee || 0;
+      if (typeof amount === 'string') amount = parseFloat(amount);
+      if (isNaN(amount)) amount = 0;
       
-      if (result.success) {
-        setAnalytics(result.data);
-        currentTotal = result.data.total || 0;
-        setStats(prev => ({ ...prev, totalRevenue: currentTotal }));
-      }
-
-      const lastYearStart = new Date(dateRange.start);
-      lastYearStart.setFullYear(lastYearStart.getFullYear() - 1);
-      const lastYearEnd = new Date(dateRange.end);
-      lastYearEnd.setFullYear(lastYearEnd.getFullYear() - 1);
+      totalRevenue += amount;
       
-      const lastYearResult = await getRevenueAnalytics(lastYearStart, lastYearEnd);
-      if (lastYearResult.success) {
-        const lastYearTotal = lastYearResult.data.total || 0;
-        const growth = lastYearTotal > 0 ? ((currentTotal - lastYearTotal) / lastYearTotal) * 100 : 0;
-        setStats(prev => ({ 
-          ...prev, 
-          lastYearRevenue: lastYearTotal,
-          revenueGrowth: growth 
-        }));
+      // Group by department
+      const deptId = apt.department;
+      if (deptId) {
+        revenueByDepartment[deptId] = (revenueByDepartment[deptId] || 0) + amount;
       }
-
-      try {
-  const startDate = new Date();
-  startDate.setFullYear(startDate.getFullYear() - 1);
-  
-  const endDate = new Date();
-  
-  const financialResult = await getFinancialSummary(startDate, endDate);
-  if (financialResult.success) {
+    }
+    
+    // Get total expenses from various sources
+    let totalExpenses = 0;
+    
+    // Get expenses from expenses collection
+    const expensesQuery = query(collection(db, 'expenses'));
+    const expensesSnap = await getDocs(expensesQuery);
+    for (const expDoc of expensesSnap.docs) {
+      const exp = expDoc.data();
+      totalExpenses += exp.amount || 0;
+    }
+    
+    // Get paid salaries
+    const salaryQuery = query(collection(db, 'salaryRecords'), where('status', '==', 'paid'));
+    const salarySnap = await getDocs(salaryQuery);
+    for (const salDoc of salarySnap.docs) {
+      const sal = salDoc.data();
+      totalExpenses += sal.calculatedSalary || 0;
+    }
+    
+    // Get inventory purchases
+    const purchasesQuery = query(collection(db, 'purchaseOrders'), where('status', '==', 'delivered'));
+    const purchasesSnap = await getDocs(purchasesQuery);
+    for (const poDoc of purchasesSnap.docs) {
+      const po = poDoc.data();
+      totalExpenses += po.total || 0;
+    }
+    
+    const profit = totalRevenue - totalExpenses;
+    const profitMargin = totalRevenue > 0 ? (profit / totalRevenue) * 100 : 0;
+    
+    // Update stats
     setStats(prev => ({
       ...prev,
-      lastYearExpenses: financialResult.data.totalExpenses || 0,
-      lastYearProfit: financialResult.data.profit || 0
+      totalRevenue: totalRevenue,
+      lastYearProfit: profit,
+      profitMargin: profitMargin
     }));
+    
+    setAnalytics({
+      total: totalRevenue,
+      byDepartment: revenueByDepartment,
+      byDay: {}
+    });
+    
+  } catch (error) {
+    console.error('Error fetching analytics:', error);
+    toast.error('Failed to load financial data');
   }
-} catch (error) {
-  console.error('Error in financial summary:', error);
-}
-    } catch (error) {
-      console.error('Error fetching analytics:', error);
-    }
-  }, [dateRange]);
+}, []);
 
   const fetchStaff = useCallback(async () => {
     try {
@@ -353,17 +387,6 @@ const [salaryStats, setSalaryStats] = useState({
       }
     } catch (error) {
       console.error('Error fetching departments:', error);
-    }
-  }, []);
-
-  const fetchBeds = useCallback(async () => {
-    try {
-      const result = await getBedsByStatus();
-      if (result.success) {
-        setBeds(result.data);
-      }
-    } catch (error) {
-      console.error('Error fetching beds:', error);
     }
   }, []);
 
@@ -427,17 +450,6 @@ const [salaryStats, setSalaryStats] = useState({
     }
   }, []);
 
-  const fetchOperations = useCallback(async () => {
-    try {
-      const result = await getOperations({ status: 'scheduled' });
-      if (result.success) {
-        setOperations(result.data);
-      }
-    } catch (error) {
-      console.error('Error fetching operations:', error);
-    }
-  }, []);
-
   const fetchPricingConfig = useCallback(async () => {
     try {
       const result = await getPricingConfig();
@@ -457,8 +469,6 @@ const [salaryStats, setSalaryStats] = useState({
         await Promise.all([
           fetchAnalytics(),
           fetchAlerts(),
-          fetchBeds(),
-          fetchOperations(),
           fetchStaff(),
           fetchPatients(),
           fetchPendingDeactivationCount()
@@ -474,9 +484,7 @@ const [salaryStats, setSalaryStats] = useState({
           fetchStaff(),
           fetchPricingConfig()
         ]);
-      } else if (activeTab === 'beds') {
-        await fetchBeds();
-      } else if (activeTab === 'audit') {
+      }else if (activeTab === 'audit') {
         await fetchAuditLogs();
       } else if (activeTab === 'patients') {
         await fetchPatients();
@@ -492,7 +500,7 @@ const [salaryStats, setSalaryStats] = useState({
     } finally {
       setLoading(false);
     }
-  }, [activeTab, fetchAnalytics, fetchAlerts, fetchBeds, fetchOperations, fetchStaff, fetchDepartments, fetchAuditLogs, fetchPatients, fetchPricingConfig, fetchPendingDeactivationCount]);
+  }, [activeTab, fetchAnalytics, fetchAlerts, fetchStaff, fetchDepartments, fetchAuditLogs, fetchPatients, fetchPricingConfig, fetchPendingDeactivationCount]);
 
   const fetchSalaryRecords = useCallback(async () => {
   setLoadingRecords(true);
@@ -789,25 +797,6 @@ const handleCreateStaff = async (e) => {
     }
   };
 
-  const handleUpdatePricing = async (pricingData) => {
-    setLoading(true);
-    try {
-      const result = await updatePricing(pricingData, currentUser.uid);
-      
-      if (result.success) {
-        toast.success('Pricing updated successfully');
-        fetchPricingConfig();
-      } else {
-        toast.error(result.error || 'Failed to update pricing');
-      }
-    } catch (error) {
-      console.error('Error updating pricing:', error);
-      toast.error('Failed to update pricing');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleExportData = async (type) => {
     try {
       let result;
@@ -906,6 +895,47 @@ const resetForm = () => {
     }
   };
 
+  const handleUpdateSalary = async (e) => {
+  e.preventDefault();
+  
+  if (!updateSalaryData.baseSalary || updateSalaryData.baseSalary <= 0) {
+    toast.error('Please enter a valid salary amount');
+    return;
+  }
+  
+  setLoading(true);
+  try {
+    const { updateUserSalary } = await import('../database');
+    const result = await updateUserSalary(
+      selectedUpdateSalary.userId,
+      parseFloat(updateSalaryData.baseSalary),
+      updateSalaryData.reason,
+      currentUser.uid
+    );
+    
+    if (result.success) {
+      toast.success(`Salary updated for ${selectedUpdateSalary.userName} to ${formatCurrency(updateSalaryData.baseSalary)}`);
+      setShowUpdateSalaryModal(false);
+      setSelectedUpdateSalary(null);
+      setUpdateSalaryData({ baseSalary: '', reason: '' });
+      fetchSalaryRecords(); // Refresh salary records
+      fetchStaff(); // Refresh staff data
+    } else {
+      toast.error(result.error || 'Failed to update salary');
+    }
+  } catch (error) {
+    console.error('Error updating salary:', error);
+    toast.error('Failed to update salary');
+  } finally {
+    setLoading(false);
+  }
+};
+
+const handleViewSalaryHistory = (record) => {
+  setSelectedSalaryForHistory(record);
+  setShowSalaryHistoryModal(true);
+};
+
   const getFilteredStaff = () => {
     let filtered = staff.allStaff;
     
@@ -980,11 +1010,9 @@ const resetForm = () => {
     { id: 'patients', label: 'Patients', icon: faUserInjured },
     { id: 'support', label: 'Support Messages', icon: faEnvelope },
     { id: 'departments', label: 'Departments', icon: faBuilding },
-    { id: 'pricing', label: 'Pricing Controls', icon: faDollarSign },
+    { id: 'pricing_approvals', label: 'Pricing Approvals', icon: faDollarSign },
     { id: 'salary', label: 'Salary Management', icon: faMoneyCheck },
-    { id: 'beds', label: 'Bed Management', icon: faBed },
     { id: 'audit', label: 'Audit Logs', icon: faFileMedical },
-    { id: 'analytics', label: 'Analytics', icon: faChartBar },
     { id: 'deactivation', label: 'Deactivation Requests', icon: faUserClock },
   ];
 
@@ -1112,12 +1140,12 @@ const resetForm = () => {
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm">
                           <button
-                            onClick={() => handleViewStaffDetails(patient.id, patient.fullName, 'Patient')}
-                            className="text-blue-600 hover:text-blue-700 mr-2"
-                            title="View History"
-                          >
-                            <FontAwesomeIcon icon={faEye} />
-                          </button>
+  onClick={() => handleViewPatientHistory(patient.id, patient.fullName)}
+  className="text-blue-600 hover:text-blue-700 mr-2"
+  title="View History"
+>
+  <FontAwesomeIcon icon={faEye} />
+</button>
                           <button
                             onClick={() => handleUpdateStaffStatus(patient.id, patient.accountStatus)}
                             className={`mr-2 ${
@@ -1199,71 +1227,74 @@ const resetForm = () => {
         </div>
       </div>
 
-      {/* Stats Cards - Responsive Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-600 dark:text-gray-400">Total Revenue</p>
-              <p className="text-xl sm:text-2xl font-semibold text-gray-900 dark:text-white">
-                {formatCurrency(analytics?.total || 0)}
-              </p>
-              <p className={`text-xs mt-1 flex items-center ${stats.revenueGrowth >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                <FontAwesomeIcon icon={stats.revenueGrowth >= 0 ? faArrowUp : faArrowDown} className="mr-1" />
-                {Math.abs(stats.revenueGrowth).toFixed(1)}% vs last year
-              </p>
-            </div>
-            <div className="p-3 bg-green-100 dark:bg-green-900 rounded-full">
-              <FontAwesomeIcon icon={faDollarSign} className="h-5 w-5 sm:h-6 sm:w-6 text-green-600 dark:text-green-400" />
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-600 dark:text-gray-400">Total Patients</p>
-              <p className="text-xl sm:text-2xl font-semibold text-gray-900 dark:text-white">
-                {stats.totalPatients}
-              </p>
-              <p className="text-xs text-blue-600 mt-1">Registered patients</p>
-            </div>
-            <div className="p-3 bg-blue-100 dark:bg-blue-900 rounded-full">
-              <FontAwesomeIcon icon={faUserInjured} className="h-5 w-5 sm:h-6 sm:w-6 text-blue-600 dark:text-blue-400" />
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-600 dark:text-gray-400">Staff</p>
-              <p className="text-xl sm:text-2xl font-semibold text-gray-900 dark:text-white">
-                {stats.activeStaff}/{stats.totalStaff}
-              </p>
-              <p className="text-xs text-purple-600 mt-1">Active staff</p>
-            </div>
-            <div className="p-3 bg-purple-100 dark:bg-purple-900 rounded-full">
-              <FontAwesomeIcon icon={faUserCog} className="h-5 w-5 sm:h-6 sm:w-6 text-purple-600 dark:text-purple-400" />
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-600 dark:text-gray-400">Net Profit/Loss</p>
-              <p className={`text-xl sm:text-2xl font-semibold ${stats.lastYearProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                {formatCurrency(Math.abs(stats.lastYearProfit))}
-              </p>
-              <p className="text-xs text-gray-500 mt-1">Current year</p>
-            </div>
-            <div className="p-3 bg-indigo-100 dark:bg-indigo-900 rounded-full">
-              <FontAwesomeIcon icon={faBalanceScale} className="h-5 w-5 sm:h-6 sm:w-6 text-indigo-600 dark:text-indigo-400" />
-            </div>
-          </div>
-        </div>
+{/* Stats Cards - Responsive Grid */}
+<div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+  <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+    <div className="flex items-center justify-between">
+      <div>
+        <p className="text-sm text-gray-600 dark:text-gray-400">Total Revenue</p>
+        <p className="text-xl sm:text-2xl font-semibold text-gray-900 dark:text-white">
+          {formatCurrency(stats.totalRevenue)}
+        </p>
+        <p className={`text-xs mt-1 flex items-center ${stats.revenueGrowth >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+          <FontAwesomeIcon icon={stats.revenueGrowth >= 0 ? faArrowUp : faArrowDown} className="mr-1" />
+          {Math.abs(stats.revenueGrowth).toFixed(1)}% vs last year
+        </p>
       </div>
+      <div className="p-3 bg-green-100 dark:bg-green-900 rounded-full">
+        <FontAwesomeIcon icon={faDollarSign} className="h-5 w-5 sm:h-6 sm:w-6 text-green-600 dark:text-green-400" />
+      </div>
+    </div>
+  </div>
+
+  <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+    <div className="flex items-center justify-between">
+      <div>
+        <p className="text-sm text-gray-600 dark:text-gray-400">Total Patients</p>
+        <p className="text-xl sm:text-2xl font-semibold text-gray-900 dark:text-white">
+          {stats.totalPatients}
+        </p>
+        <p className="text-xs text-blue-600 mt-1">Registered patients</p>
+      </div>
+      <div className="p-3 bg-blue-100 dark:bg-blue-900 rounded-full">
+        <FontAwesomeIcon icon={faUserInjured} className="h-5 w-5 sm:h-6 sm:w-6 text-blue-600 dark:text-blue-400" />
+      </div>
+    </div>
+  </div>
+
+  <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+    <div className="flex items-center justify-between">
+      <div>
+        <p className="text-sm text-gray-600 dark:text-gray-400">Staff</p>
+        <p className="text-xl sm:text-2xl font-semibold text-gray-900 dark:text-white">
+          {stats.activeStaff}/{stats.totalStaff}
+        </p>
+        <p className="text-xs text-purple-600 mt-1">Active staff</p>
+      </div>
+      <div className="p-3 bg-purple-100 dark:bg-purple-900 rounded-full">
+        <FontAwesomeIcon icon={faUserCog} className="h-5 w-5 sm:h-6 sm:w-6 text-purple-600 dark:text-purple-400" />
+      </div>
+    </div>
+  </div>
+
+  <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
+    <div className="flex items-center justify-between">
+      <div>
+        <p className="text-sm text-gray-600 dark:text-gray-400">Net Profit/Loss</p>
+        <p className={`text-xl sm:text-2xl font-semibold ${stats.lastYearProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+          {formatCurrency(Math.abs(stats.lastYearProfit))}
+          {stats.lastYearProfit < 0 && ' (Loss)'}
+        </p>
+        <p className="text-xs text-gray-500 mt-1">
+          Margin: {stats.profitMargin?.toFixed(1) || 0}%
+        </p>
+      </div>
+      <div className="p-3 bg-indigo-100 dark:bg-indigo-900 rounded-full">
+        <FontAwesomeIcon icon={faBalanceScale} className="h-5 w-5 sm:h-6 sm:w-6 text-indigo-600 dark:text-indigo-400" />
+      </div>
+    </div>
+  </div>
+</div>
 
 {/* Add after existing stats cards */}
 {pendingDeactivationCount > 0 && (
@@ -1373,14 +1404,6 @@ const resetForm = () => {
         </button>
         
         <button
-          onClick={() => setShowPricingModal(true)}
-          className="bg-white dark:bg-gray-800 rounded-lg shadow p-4 hover:shadow-lg transition flex items-center justify-center space-x-2"
-        >
-          <FontAwesomeIcon icon={faDollarSign} className="text-green-600" />
-          <span>Update Pricing</span>
-        </button>
-        
-        <button
           onClick={handleOpenHospitalHistory}
           className="bg-gradient-to-r from-purple-500 to-purple-600 text-white rounded-lg shadow p-4 hover:shadow-lg transition flex items-center justify-center space-x-2"
         >
@@ -1395,37 +1418,6 @@ const resetForm = () => {
           <FontAwesomeIcon icon={faFileExport} className="text-indigo-600" />
           <span>Export Data</span>
         </button>
-      </div>
-
-      {/* Recent Operations */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
-        <div className="px-4 sm:px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Upcoming Operations</h3>
-        </div>
-        <div className="p-4 sm:p-6">
-          {operations.length > 0 ? (
-            <div className="space-y-4">
-              {operations.slice(0, 5).map((op) => (
-                <div key={op.id} className="flex flex-col sm:flex-row sm:items-center justify-between py-3 border-b border-gray-100 dark:border-gray-700 last:border-0 gap-2">
-                  <div>
-                    <p className="font-medium text-gray-900 dark:text-white">{op.patientName}</p>
-                    <p className="text-sm text-gray-600 dark:text-gray-400">
-                      {op.operationType} • {formatDate(op.scheduledDate)}
-                    </p>
-                  </div>
-                  <span className={`px-3 py-1 rounded-full text-xs w-fit ${
-                    op.status === 'scheduled' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' :
-                    'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-                  }`}>
-                    {op.status}
-                  </span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-center text-gray-500 dark:text-gray-400 py-4">No upcoming operations</p>
-          )}
-        </div>
       </div>
     </div>
   );
@@ -2018,8 +2010,7 @@ const renderSalaryManagement = () => {
             <p className="text-sm text-blue-800 dark:text-blue-200 font-medium">About Salary Management</p>
             <p className="text-xs text-blue-700 dark:text-blue-300 mt-1">
               Salary calculations, payments, and attendance marking are managed in the Accountant portal.
-              As an admin, you can view salary history and records here. For detailed salary operations,
-              please navigate to the Accountant section.
+              As an admin, you can view salary history, update base salaries, and review payment records here.
             </p>
           </div>
         </div>
@@ -2057,6 +2048,7 @@ const renderSalaryManagement = () => {
                   <th className="px-3 sm:px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase">Net Salary</th>
                   <th className="px-3 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Status</th>
                   <th className="px-3 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Payment Date</th>
+                  <th className="px-3 sm:px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
@@ -2077,7 +2069,7 @@ const renderSalaryManagement = () => {
                     <td className="px-3 sm:px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
                       {record.month}/{record.year}
                     </td>
-                    <td className="px-3 sm:px-6 py-4 whitespace-nowrap text-right text-sm text-gray-600">
+                    <td className="px-3 sm:px-6 py-4 whitespace-nowrap text-right text-sm font-medium text-blue-600">
                       {formatCurrency(record.baseSalary)}
                     </td>
                     <td className="px-3 sm:px-6 py-4 whitespace-nowrap text-center text-sm text-gray-900 dark:text-white">
@@ -2098,6 +2090,28 @@ const renderSalaryManagement = () => {
                     <td className="px-3 sm:px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
                       {record.paidAt ? formatDate(record.paidAt.toDate?.() || record.paidAt) : '—'}
                     </td>
+                    <td className="px-3 sm:px-6 py-4 whitespace-nowrap text-center">
+                      <div className="flex justify-center gap-2">
+                        <button
+                          onClick={() => handleViewSalaryHistory(record)}
+                          className="text-blue-600 hover:text-blue-700"
+                          title="View History"
+                        >
+                          <FontAwesomeIcon icon={faEye} />
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSelectedUpdateSalary(record);
+                            setUpdateSalaryData({ baseSalary: record.baseSalary, reason: '' });
+                            setShowUpdateSalaryModal(true);
+                          }}
+                          className="text-green-600 hover:text-green-700"
+                          title="Update Salary"
+                        >
+                          <FontAwesomeIcon icon={faEdit} />
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -2111,120 +2125,214 @@ const renderSalaryManagement = () => {
         )}
       </div>
 
-      {/* Quick Links */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Quick Actions</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <button
-            onClick={() => {
-              toast.info('Navigate to Accountant portal for salary calculations and payments');
-            }}
-            className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-blue-500 transition group text-center"
-          >
-            <FontAwesomeIcon icon={faCalculator} className="h-8 w-8 text-gray-400 group-hover:text-blue-500 mb-2" />
-            <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Salary Calculations</p>
-            <p className="text-xs text-gray-400 mt-1">Manage in Accountant Portal</p>
-          </button>
-          
-          <button
-            onClick={() => {
-              toast.info('Navigate to Accountant portal for attendance management');
-            }}
-            className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-green-500 transition group text-center"
-          >
-            <FontAwesomeIcon icon={faUserClock} className="h-8 w-8 text-gray-400 group-hover:text-green-500 mb-2" />
-            <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Attendance Management</p>
-            <p className="text-xs text-gray-400 mt-1">Manage in Accountant Portal</p>
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
-  const renderPricing = () => (
-    <div className="space-y-6">
-      <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Pricing Controls</h2>
-      
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-        <div className="mb-6">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">Global Pricing Configuration</h3>
-          <p className="text-sm text-gray-600 dark:text-gray-400">
-            Configure consultation fees, lab test prices, operation charges, and other service costs.
-          </p>
-        </div>
-
-        {/* Quick Stats */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-          <div className="bg-blue-50 dark:bg-blue-900 rounded-lg p-4">
-            <p className="text-sm text-blue-600 dark:text-blue-300">Consultation Fees</p>
-            <p className="text-2xl font-bold text-blue-800 dark:text-blue-200">
-              {departments.reduce((acc, dept) => acc + (dept.consultationFee || 0), 0)} configured
-            </p>
-          </div>
-          <div className="bg-green-50 dark:bg-green-900 rounded-lg p-4">
-            <p className="text-sm text-green-600 dark:text-green-300">Lab Tests</p>
-            <p className="text-2xl font-bold text-green-800 dark:text-green-200">
-              {departments.reduce((acc, dept) => acc + (dept.labTests?.length || 0), 0)} configured
-            </p>
-          </div>
-          <div className="bg-purple-50 dark:bg-purple-900 rounded-lg p-4">
-            <p className="text-sm text-purple-600 dark:text-purple-300">Operations</p>
-            <p className="text-2xl font-bold text-purple-800 dark:text-purple-200">
-              {departments.reduce((acc, dept) => acc + (dept.operations?.length || 0), 0)} configured
-            </p>
-          </div>
-        </div>
-
-        <button
-          onClick={() => setShowPricingModal(true)}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
-        >
-          <FontAwesomeIcon icon={faEdit} className="mr-2" />
-          Edit Pricing Configuration
-        </button>
-      </div>
-
-      {/* Department-specific pricing preview */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {departments.slice(0, 4).map((dept) => (
-          <div key={dept.id} className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-            <h4 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">{dept.name}</h4>
+      {/* Salary History Modal */}
+      {showSalaryHistoryModal && selectedSalaryForHistory && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-2xl w-full max-h-[80vh] overflow-y-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-semibold text-gray-900 dark:text-white">
+                Salary Details - {selectedSalaryForHistory.userName}
+              </h3>
+              <button
+                onClick={() => setShowSalaryHistoryModal(false)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <FontAwesomeIcon icon={faTimes} size="lg" />
+              </button>
+            </div>
             
-            <div className="space-y-3">
+            <div className="space-y-4">
+              {/* Employee Info */}
+              <div className="grid grid-cols-2 gap-4 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                <div>
+                  <p className="text-xs text-gray-500">Role</p>
+                  <p className="font-medium capitalize">{selectedSalaryForHistory.userRole}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500">Department</p>
+                  <p className="font-medium">{selectedSalaryForHistory.userDepartment || 'N/A'}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500">Period</p>
+                  <p className="font-medium">{selectedSalaryForHistory.month}/{selectedSalaryForHistory.year}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-gray-500">Status</p>
+                  <span className={`px-2 py-1 rounded-full text-xs ${
+                    selectedSalaryForHistory.status === 'paid' 
+                      ? 'bg-green-100 text-green-800'
+                      : 'bg-yellow-100 text-yellow-800'
+                  }`}>
+                    {selectedSalaryForHistory.status}
+                  </span>
+                </div>
+              </div>
+              
+              {/* Salary Breakdown */}
+              <div className="p-4 border border-gray-200 dark:border-gray-700 rounded-lg">
+                <h4 className="font-medium mb-3">Salary Breakdown</h4>
+                <div className="space-y-2">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Base Salary:</span>
+                    <span className="font-medium">{formatCurrency(selectedSalaryForHistory.baseSalary)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Working Days:</span>
+                    <span>{selectedSalaryForHistory.workingDays} / 26 days</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Per Day Rate:</span>
+                    <span>{formatCurrency(selectedSalaryForHistory.perDaySalary)}</span>
+                  </div>
+                  {selectedSalaryForHistory.absentDays > 0 && (
+                    <div className="flex justify-between text-red-600">
+                      <span>Absent Days ({selectedSalaryForHistory.absentDays}):</span>
+                      <span>-{formatCurrency(selectedSalaryForHistory.absentDays * selectedSalaryForHistory.perDaySalary)}</span>
+                    </div>
+                  )}
+                  {selectedSalaryForHistory.lateDays > 0 && (
+                    <div className="flex justify-between text-yellow-600">
+                      <span>Late Days ({selectedSalaryForHistory.lateDays}):</span>
+                      <span>-{formatCurrency(selectedSalaryForHistory.lateDays * selectedSalaryForHistory.perDaySalary * 0.5)}</span>
+                    </div>
+                  )}
+                  <div className="border-t pt-2 mt-2">
+                    <div className="flex justify-between font-bold">
+                      <span>Net Salary:</span>
+                      <span className="text-green-600">{formatCurrency(selectedSalaryForHistory.calculatedSalary)}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              
+              {/* Payment Info (if paid) */}
+              {selectedSalaryForHistory.status === 'paid' && (
+                <div className="p-4 bg-green-50 dark:bg-green-900/30 rounded-lg">
+                  <h4 className="font-medium text-green-800 dark:text-green-200 mb-2">Payment Information</h4>
+                  <div className="grid grid-cols-2 gap-2 text-sm">
+                    <div>
+                      <p className="text-green-700 dark:text-green-300">Paid On:</p>
+                      <p className="font-medium">{selectedSalaryForHistory.paidAt ? formatDate(selectedSalaryForHistory.paidAt.toDate?.() || selectedSalaryForHistory.paidAt) : 'N/A'}</p>
+                    </div>
+                    <div>
+                      <p className="text-green-700 dark:text-green-300">Payment Method:</p>
+                      <p className="font-medium capitalize">{selectedSalaryForHistory.paymentMethod || 'Bank Transfer'}</p>
+                    </div>
+                    <div className="col-span-2">
+                      <p className="text-green-700 dark:text-green-300">Reference:</p>
+                      <p className="font-medium">{selectedSalaryForHistory.paymentReference || 'N/A'}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              <div className="flex justify-end">
+                <button
+                  onClick={() => setShowSalaryHistoryModal(false)}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Update Salary Modal */}
+      {showUpdateSalaryModal && selectedUpdateSalary && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-md w-full">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-semibold text-gray-900 dark:text-white">
+                Update Salary - {selectedUpdateSalary.userName}
+              </h3>
+              <button
+                onClick={() => setShowUpdateSalaryModal(false)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <FontAwesomeIcon icon={faTimes} size="lg" />
+              </button>
+            </div>
+            
+            <form onSubmit={handleUpdateSalary} className="space-y-4">
               <div>
-                <p className="text-sm text-gray-600 dark:text-gray-400">Consultation Fee</p>
-                <p className="text-lg font-medium text-gray-900 dark:text-white">
-                  {formatCurrency(dept.consultationFee || 0)}
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Current Salary
+                </label>
+                <p className="text-lg font-bold text-gray-900 dark:text-white">
+                  {formatCurrency(selectedUpdateSalary.baseSalary)}
                 </p>
               </div>
               
               <div>
-                <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">Common Services</p>
-                <ul className="space-y-1">
-                  {(dept.services || []).slice(0, 3).map((service, idx) => (
-                    <li key={idx} className="text-sm text-gray-900 dark:text-white flex justify-between">
-                      <span>{service.name}</span>
-                      <span>{formatCurrency(service.price || 0)}</span>
-                    </li>
-                  ))}
-                </ul>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  New Base Salary (PKR) <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="number"
+                  value={updateSalaryData.baseSalary}
+                  onChange={(e) => setUpdateSalaryData({ ...updateSalaryData, baseSalary: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
+                  placeholder="Enter new salary amount"
+                  min="0"
+                  step="1000"
+                  required
+                />
               </div>
               
-              <button
-                onClick={() => {
-                  setSelectedDepartmentId(dept.id);
-                  setShowDepartmentModal(true);
-                }}
-                className="text-blue-600 hover:text-blue-700 text-sm"
-              >
-                View All Services →
-              </button>
-            </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Reason for Update
+                </label>
+                <textarea
+                  value={updateSalaryData.reason}
+                  onChange={(e) => setUpdateSalaryData({ ...updateSalaryData, reason: e.target.value })}
+                  rows="3"
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
+                  placeholder="Enter reason for salary change..."
+                />
+              </div>
+              
+              <div className="bg-yellow-50 dark:bg-yellow-900/30 p-3 rounded-lg">
+                <div className="flex items-start">
+                  <FontAwesomeIcon icon={faInfoCircle} className="text-yellow-600 dark:text-yellow-400 mr-2 mt-0.5" />
+                  <p className="text-xs text-yellow-800 dark:text-yellow-200">
+                    Salary changes will affect future salary calculations. The accountant will see the updated base salary for upcoming months.
+                  </p>
+                </div>
+              </div>
+              
+              <div className="flex justify-end space-x-3 pt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowUpdateSalaryModal(false)}
+                  className="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg hover:bg-gray-50 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:opacity-50 flex items-center"
+                >
+                  {loading ? (
+                    <>
+                      <FontAwesomeIcon icon={faSpinner} className="animate-spin mr-2" />
+                      Updating...
+                    </>
+                  ) : (
+                    'Update Salary'
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
-        ))}
-      </div>
+        </div>
+      )}
     </div>
   );
+};
 
   const renderAuditLogs = () => (
     <div className="space-y-6">
@@ -2378,374 +2486,6 @@ const renderSalaryManagement = () => {
       )}
     </div>
   );
-
-  // ==================== RENDER ANALYTICS FUNCTION ====================
-
-  const renderAnalytics = () => {
-    const averageDailyRevenue = analytics?.byDay && Object.keys(analytics.byDay).length > 0
-      ? Object.values(analytics.byDay).reduce((a, b) => a + b, 0) / Object.keys(analytics.byDay).length
-      : 0;
-
-    const bestDay = analytics?.byDay && Object.keys(analytics.byDay).length > 0
-      ? Object.entries(analytics.byDay).reduce((best, current) => 
-          current[1] > best[1] ? current : best
-        )
-      : ['N/A', 0];
-
-    const departmentPerformance = analytics?.byDepartment && Object.keys(analytics.byDepartment).length > 0
-      ? Object.entries(analytics.byDepartment)
-          .map(([id, revenue]) => ({
-            id,
-            name: departments.find(d => d.id === id)?.name || id,
-            revenue,
-            percentage: (revenue / (analytics?.total || 1)) * 100
-          }))
-          .sort((a, b) => b.revenue - a.revenue)
-      : [];
-
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    
-    const monthlyRevenue = months.map((month, index) => {
-      const monthData = analytics?.byMonth?.[`2024-${String(index + 1).padStart(2, '0')}`] || 0;
-      return {
-        month,
-        revenue: monthData || Math.floor(averageDailyRevenue * 30 * (0.8 + Math.random() * 0.4))
-      };
-    });
-
-    return (
-      <div className="space-y-6">
-        <div className="flex justify-between items-center">
-          <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Advanced Analytics</h2>
-          <div className="flex space-x-2">
-            <button
-              onClick={() => handleExportData('analytics')}
-              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition flex items-center"
-            >
-              <FontAwesomeIcon icon={faFileExport} className="mr-2" />
-              Export Report
-            </button>
-            <button
-              onClick={fetchAnalytics}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition flex items-center"
-            >
-              <FontAwesomeIcon icon={faSync} className="mr-2" />
-              Refresh
-            </button>
-          </div>
-        </div>
-
-        {/* Date Range Picker */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-            <label className="text-sm font-medium text-gray-700 dark:text-gray-300 whitespace-nowrap">
-              <FontAwesomeIcon icon={faCalendarAlt} className="mr-2" />
-              Analysis Period:
-            </label>
-            <div className="flex flex-col sm:flex-row w-full sm:w-auto gap-2">
-              <DatePicker
-                selectsRange={true}
-                startDate={dateRange.start}
-                endDate={dateRange.end}
-                onChange={(update) => {
-                  setDateRange({
-                    start: update[0],
-                    end: update[1]
-                  });
-                }}
-                className="w-full sm:w-auto px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-              />
-              <button
-                onClick={fetchAnalytics}
-                className="w-full sm:w-auto px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm"
-              >
-                Apply
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Key Performance Indicators */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg shadow-lg p-6 text-white">
-            <p className="text-blue-100 text-sm">Total Revenue</p>
-            <p className="text-3xl font-bold">{formatCurrency(analytics?.total || 0)}</p>
-            <div className="mt-4 flex items-center text-blue-100">
-              <FontAwesomeIcon icon={faArrowUp} className="mr-1" />
-              <span className="text-sm">{stats.revenueGrowth.toFixed(1)}% vs last year</span>
-            </div>
-          </div>
-
-          <div className="bg-gradient-to-br from-green-500 to-green-600 rounded-lg shadow-lg p-6 text-white">
-            <p className="text-green-100 text-sm">Average Daily Revenue</p>
-            <p className="text-3xl font-bold">{formatCurrency(averageDailyRevenue)}</p>
-            <p className="text-green-100 text-sm mt-4">
-              Best Day: {bestDay[0]} ({formatCurrency(bestDay[1])})
-            </p>
-          </div>
-
-          <div className="bg-gradient-to-br from-purple-500 to-purple-600 rounded-lg shadow-lg p-6 text-white">
-            <p className="text-purple-100 text-sm">Net Profit</p>
-            <p className={`text-3xl font-bold ${stats.lastYearProfit >= 0 ? 'text-white' : 'text-red-200'}`}>
-              {formatCurrency(Math.abs(stats.lastYearProfit))}
-            </p>
-            <p className="text-purple-100 text-sm mt-4">
-              Margin: {analytics?.total ? ((stats.lastYearProfit / analytics.total) * 100).toFixed(1) : 0}%
-            </p>
-          </div>
-
-          <div className="bg-gradient-to-br from-orange-500 to-orange-600 rounded-lg shadow-lg p-6 text-white">
-            <p className="text-orange-100 text-sm">Active Patients</p>
-            <p className="text-3xl font-bold">{stats.totalPatients}</p>
-            <p className="text-orange-100 text-sm mt-4">
-              Avg per day: {(stats.totalPatients / (Object.keys(analytics?.byDay || {}).length || 1)).toFixed(0)}
-            </p>
-          </div>
-        </div>
-
-        {/* Revenue Trends Chart */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Revenue Trends</h3>
-          <div className="h-80">
-            <Line
-              data={{
-                labels: Object.keys(analytics?.byDay || {}),
-                datasets: [
-                  {
-                    label: 'Daily Revenue',
-                    data: Object.values(analytics?.byDay || {}),
-                    borderColor: 'rgb(59, 130, 246)',
-                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                    tension: 0.4,
-                    fill: true
-                  }
-                ]
-              }}
-              options={{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                  legend: {
-                    display: false
-                  },
-                  tooltip: {
-                    callbacks: {
-                      label: (context) => formatCurrency(context.parsed.y)
-                    }
-                  }
-                },
-                scales: {
-                  y: {
-                    beginAtZero: true,
-                    ticks: {
-                      callback: (value) => formatCurrency(value)
-                    }
-                  }
-                }
-              }}
-            />
-          </div>
-        </div>
-
-        {/* Monthly Performance */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Monthly Revenue</h3>
-            <div className="h-64">
-              <Bar
-                data={{
-                  labels: monthlyRevenue.map(m => m.month),
-                  datasets: [
-                    {
-                      label: 'Revenue',
-                      data: monthlyRevenue.map(m => m.revenue),
-                      backgroundColor: 'rgba(34, 197, 94, 0.5)',
-                      borderColor: 'rgb(34, 197, 94)',
-                      borderWidth: 1
-                    }
-                  ]
-                }}
-                options={{
-                  responsive: true,
-                  maintainAspectRatio: false,
-                  plugins: {
-                    legend: {
-                      display: false
-                    },
-                    tooltip: {
-                      callbacks: {
-                        label: (context) => formatCurrency(context.parsed.y)
-                      }
-                    }
-                  },
-                  scales: {
-                    y: {
-                      beginAtZero: true,
-                      ticks: {
-                        callback: (value) => formatCurrency(value)
-                      }
-                    }
-                  }
-                }}
-              />
-            </div>
-          </div>
-
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Department Performance</h3>
-            <div className="space-y-4">
-              {departmentPerformance.slice(0, 5).map((dept) => (
-                <div key={dept.id}>
-                  <div className="flex justify-between text-sm mb-1">
-                    <span className="text-gray-700 dark:text-gray-300">{dept.name}</span>
-                    <span className="text-gray-900 dark:text-white font-medium">
-                      {formatCurrency(dept.revenue)}
-                    </span>
-                  </div>
-                  <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-                    <div
-                      className="bg-blue-600 h-2 rounded-full"
-                      style={{ width: `${dept.percentage}%` }}
-                    ></div>
-                  </div>
-                  <p className="text-xs text-gray-500 mt-1">{dept.percentage.toFixed(1)}% of total</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* Detailed Analytics Table */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Daily Breakdown</h3>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="min-w-full">
-              <thead className="bg-gray-50 dark:bg-gray-900">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Date</th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Revenue</th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">% of Total</th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Cumulative</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-                {analytics?.byDay && Object.entries(analytics.byDay)
-                  .sort((a, b) => b[0].localeCompare(a[0]))
-                  .slice(0, 30)
-                  .map(([date, revenue], index, array) => {
-                    const percentage = (revenue / (analytics?.total || 1)) * 100;
-                    const cumulative = array
-                      .slice(0, index + 1)
-                      .reduce((sum, [rev]) => sum + rev, 0);
-                    
-                    return (
-                      <tr key={date}>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                          {date}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-green-600 font-medium">
-                          {formatCurrency(revenue)}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-gray-600 dark:text-gray-400">
-                          {percentage.toFixed(1)}%
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-right text-blue-600 font-medium">
-                          {formatCurrency(cumulative)}
-                        </td>
-                      </tr>
-                    );
-                  })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* Smart Insights */}
-        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-900 dark:to-indigo-900 rounded-lg shadow p-6">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">📊 Smart Insights</h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4">
-              <p className="text-sm text-gray-600 dark:text-gray-400">Peak Revenue Day</p>
-              <p className="text-xl font-bold text-gray-900 dark:text-white">
-                {bestDay[0] !== 'N/A' ? bestDay[0] : 'N/A'}
-              </p>
-              <p className="text-sm text-green-600 mt-1">
-                {bestDay[0] !== 'N/A' ? formatCurrency(bestDay[1]) : 'No data'}
-              </p>
-            </div>
-            
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4">
-              <p className="text-sm text-gray-600 dark:text-gray-400">Top Performing Department</p>
-              <p className="text-xl font-bold text-gray-900 dark:text-white">
-                {departmentPerformance[0]?.name || 'N/A'}
-              </p>
-              <p className="text-sm text-blue-600 mt-1">
-                {departmentPerformance[0] ? `${departmentPerformance[0].percentage.toFixed(1)}% of total` : 'No data'}
-              </p>
-            </div>
-
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4">
-              <p className="text-sm text-gray-600 dark:text-gray-400">Average Transaction Value</p>
-              <p className="text-xl font-bold text-gray-900 dark:text-white">
-                {analytics?.total && Object.keys(analytics.byDay).length
-                  ? formatCurrency(analytics.total / Object.keys(analytics.byDay).length)
-                  : formatCurrency(0)}
-              </p>
-              <p className="text-sm text-purple-600 mt-1">Per day average</p>
-            </div>
-
-            <div className="bg-white dark:bg-gray-800 rounded-lg p-4">
-              <p className="text-sm text-gray-600 dark:text-gray-400">Growth Rate</p>
-              <p className={`text-xl font-bold ${stats.revenueGrowth >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                {stats.revenueGrowth.toFixed(1)}%
-              </p>
-              <p className="text-sm text-gray-500 mt-1">Year over year</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Export and Report Generation */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Generate Reports</h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-            <button
-              onClick={() => handleExportData('financial')}
-              className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-green-500 transition group"
-            >
-              <FontAwesomeIcon icon={faDollarSign} className="h-8 w-8 text-gray-400 group-hover:text-green-500 mb-2" />
-              <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Financial Report</p>
-            </button>
-            
-            <button
-              onClick={() => handleExportData('departmental')}
-              className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-blue-500 transition group"
-            >
-              <FontAwesomeIcon icon={faBuilding} className="h-8 w-8 text-gray-400 group-hover:text-blue-500 mb-2" />
-              <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Department Report</p>
-            </button>
-            
-            <button
-              onClick={() => handleExportData('operational')}
-              className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-purple-500 transition group"
-            >
-              <FontAwesomeIcon icon={faChartLine} className="h-8 w-8 text-gray-400 group-hover:text-purple-500 mb-2" />
-              <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Operational Report</p>
-            </button>
-            
-            <button
-              onClick={handleOpenHospitalHistory}
-              className="p-4 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg hover:border-orange-500 transition group"
-            >
-              <FontAwesomeIcon icon={faHistory} className="h-8 w-8 text-gray-400 group-hover:text-orange-500 mb-2" />
-              <p className="text-sm font-medium text-gray-700 dark:text-gray-300">Full History</p>
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  };
 
   // Staff Creation Modal
   const renderStaffModal = () => (
@@ -3261,17 +3001,8 @@ const renderSalaryManagement = () => {
             {activeTab === 'staff' && renderStaffManagement()}
             {activeTab === 'patients' && renderPatients()}
             {activeTab === 'departments' && renderDepartments()}
-            {activeTab === 'pricing' && renderPricing()}
-            {activeTab === 'beds' && (
-              <BedGrid
-                beds={beds}
-                onAssign={() => {}}
-                onRelease={() => {}}
-                readOnly
-              />
-            )}
+            {activeTab === 'pricing_approvals' && <PricingApprovals currentUser={currentUser} />}
             {activeTab === 'audit' && renderAuditLogs()}
-            {activeTab === 'analytics' && renderAnalytics()}
             {activeTab === 'support' && <SupportMessages />}
             {activeTab === 'salary' && renderSalaryManagement()}
             {activeTab === 'deactivation' && <DeactivationRequests />}
@@ -3307,17 +3038,6 @@ const renderSalaryManagement = () => {
           }}
         />
       )}
-
-      {/* Pricing Controls Modal */}
-      {showPricingModal && (
-        <PricingControlsModal
-          departments={departments}
-          currentPricing={pricingConfig}
-          onSave={handleUpdatePricing}
-          onClose={() => setShowPricingModal(false)}
-        />
-      )}
-
       {/* Hospital History Modal */}
       {showHospitalHistoryModal && (
         <HospitalHistoryModal
@@ -3326,6 +3046,18 @@ const renderSalaryManagement = () => {
           onClose={() => setShowHospitalHistoryModal(false)}
         />
       )}
+      {/* Patient History Modal */}
+{showPatientHistoryModal && (
+  <PatientHistoryModal
+    userId={selectedPatientId}
+    userName={selectedPatientName}
+    onClose={() => {
+      setShowPatientHistoryModal(false);
+      setSelectedPatientId(null);
+      setSelectedPatientName(null);
+    }}
+  />
+)}
     </div>
   );
 };

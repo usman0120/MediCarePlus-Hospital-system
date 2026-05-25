@@ -12,7 +12,6 @@ import Patient from './pages/Patient';
 import Doctor from './pages/Doctor';
 import Admin from './pages/Admin';
 import Reception from './pages/Receptionist';
-import Lab from './pages/Lab';
 import Accountant from './pages/Accountant';
 import ForgotPassword from './pages/ForgotPassword';
 
@@ -85,12 +84,6 @@ function App() {
           <Route path="/receptionist/*" element={
             <ProtectedRoute allowedRoles={['receptionist']}>
               <Reception />
-            </ProtectedRoute>
-          } />
-          
-          <Route path="/lab/*" element={
-            <ProtectedRoute allowedRoles={['lab']}>
-              <Lab />
             </ProtectedRoute>
           } />
           

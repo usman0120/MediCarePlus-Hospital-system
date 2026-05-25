@@ -783,7 +783,7 @@ export const timeAgo = (timestamp) => {
  * @param {Object} workingHours - Working hours configuration
  * @returns {boolean} True if within working hours
  */
-export const isWithinWorkingHours = (time, workingHours = { start: 9, end: 17 }) => {
+export const isWithinWorkingHours = (time, workingHours = { start: 9, end: 24 }) => {
   if (!time) return false;
   
   try {
@@ -847,7 +847,7 @@ export const isTimeSlotAvailable = (time, bookedSlots = []) => {
  * @param {Object} range - Time range {start: 9, end: 17}
  * @returns {Array} Array of time slots
  */
-export const generateTimeSlots = (intervalMinutes = 30, range = { start: 9, end: 17 }) => {
+export const generateTimeSlots = (intervalMinutes = 30, range = { start: 9, end: 24 }) => {
   const slots = [];
   
   for (let hour = range.start; hour < range.end; hour++) {

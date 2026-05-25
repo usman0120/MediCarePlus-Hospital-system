@@ -185,8 +185,8 @@ export const validateAppointment = (data) => {
     errors.time = 'Please select a time';
   } else {
     const [hours, minutes] = data.time.split(':');
-    if (hours < 9 || hours > 17 || (hours === 17 && minutes > 0)) {
-      errors.time = 'Appointments are only available between 9:00 AM and 5:00 PM';
+    if (hours < 9 || hours > 24 || (hours === 24 && minutes > 0)) {
+      errors.time = 'Appointments are only available between 9:00 AM and 12:00 AM';
     }
   }
 

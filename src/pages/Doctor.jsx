@@ -9,7 +9,6 @@ import {
   faGraduationCap,
   faSpinner,
   faCamera,
-  faFlask,
   faMessage,
   faChartLine,
   faStar,
@@ -40,20 +39,13 @@ import {
 } from '@fortawesome/free-solid-svg-icons';
 import { logoutUser } from '../auth';
 import {
-  createVisit,
   getVisitsByDoctor,
   updateVisitEMR,
   dischargePatient,
   addPrescription,
-  createLabRequest,
-  getLabRequestsByDoctor,
   getPatientsByDoctor,
   getUnreadMessageCount,
   getPatientMedicalHistory,
-  scheduleOperation,
-  getOperations,
-  confirmOperationChecklist,
-  startOperation,
   getDoctorPerformance,
   getPendingAlerts,
   getUnreadCounts,
@@ -74,7 +66,6 @@ import {
 import { 
   validateEMR, 
   validatePrescription,
-  validateOperation 
 } from '../utils/validators';
 import toast from 'react-hot-toast';
 import Chat from '../components/Chat';
@@ -84,6 +75,7 @@ import SearchBar from '../components/SearchBar';
 // Import appointment components
 import AppointmentList from '../components/appointments/AppointmentList';
 import AppointmentDetails from '../components/appointments/AppointmentDetails';
+import ConsultationNotesModal from '../components/ConsultationNotesModal';
 
 const Doctor = () => {
   const { currentUser, userDetails } = useAuth();
@@ -107,9 +99,7 @@ const Doctor = () => {
     all: []
   });
   const [visits, setVisits] = useState([]);
-  const [labRequests, setLabRequests] = useState([]);
   const [patients, setPatients] = useState([]);
-  const [operations, setOperations] = useState([]);
   const [performance, setPerformance] = useState(null);
   const [, setRatings] = useState([]);
   
@@ -122,26 +112,24 @@ const Doctor = () => {
   // Modal visibility
   const [showEMRForm, setShowEMRForm] = useState(false);
   const [showPrescriptionForm, setShowPrescriptionForm] = useState(false);
-  const [showLabRequestForm, setShowLabRequestForm] = useState(false);
-  const [showOperationForm, setShowOperationForm] = useState(false);
   const [showPatientHistory, setShowPatientHistory] = useState(false);
   const [showChat, setShowChat] = useState(false);
-  const [showLabResults, setShowLabResults] = useState(false);
   const [showAppointmentDetails, setShowAppointmentDetails] = useState(false);
-  const [selectedLabResult, setSelectedLabResult] = useState(null);
   
   // Chat state
   const [chatWith, setChatWith] = useState(null);
   const [unreadMessages, setUnreadMessages] = useState({});
-  // Add these near other useState declarations in Doctor.js (around line 100-150)
-// Ratings state
-const [ratingsData, setRatingsData] = useState([]);
-const [loadingRatings, setLoadingRatings] = useState(false);
-const [ratingStats, setRatingStats] = useState({
-  average: 0,
-  total: 0,
-  distribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }
-});
+  const [showConsultationNotesModal, setShowConsultationNotesModal] = useState(false);
+const [selectedAppointmentForConsultation, setSelectedAppointmentForConsultation] = useState(null);
+  
+  // Ratings state
+  const [ratingsData, setRatingsData] = useState([]);
+  const [loadingRatings, setLoadingRatings] = useState(false);
+  const [ratingStats, setRatingStats] = useState({
+    average: 0,
+    total: 0,
+    distribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }
+  });
   
   // Profile settings
   const [showProfileSettings, setShowProfileSettings] = useState(false);
@@ -174,36 +162,6 @@ const [ratingStats, setRatingStats] = useState({
     notes: ''
   });
 
-  // Lab request form state
-  const [labRequest, setLabRequest] = useState({
-    patientId: '',
-    patientName: '',
-    tests: [{
-      name: '',
-      instructions: ''
-    }],
-    priority: 'normal',
-    notes: ''
-  });
-
-  // Operation form state
-  const [operation, setOperation] = useState({
-    patientId: '',
-    patientName: '',
-    operationType: '',
-    requiredEquipment: [],
-    requiredStaff: [],
-    scheduledDate: '',
-    estimatedDuration: '',
-    notes: '',
-    checklist: {
-      consentConfirmed: false,
-      equipmentConfirmed: false,
-      staffConfirmed: false,
-      riskAcknowledged: false
-    }
-  });
-
   // ==================== FETCH FUNCTIONS ====================
 
   const fetchAllAppointments = useCallback(async () => {
@@ -212,54 +170,48 @@ const [ratingStats, setRatingStats] = useState({
     return result.success ? result.data : [];
   }, [currentUser?.uid]);
 
-// Update the fetchUpcomingAppointments function to include confirmed status
-const fetchUpcomingAppointments = useCallback(async () => {
-  if (!currentUser?.uid) return [];
-  // Get approved, confirmed, and scheduled appointments
-  const approvedResult = await getDoctorAppointmentsByStatus(currentUser.uid, 'approved');
-  const confirmedResult = await getDoctorAppointmentsByStatus(currentUser.uid, 'confirmed');
-  const scheduledResult = await getDoctorAppointmentsByStatus(currentUser.uid, 'scheduled');
-  
-  const all = [
-    ...(approvedResult.success ? approvedResult.data : []),
-    ...(confirmedResult.success ? confirmedResult.data : []),
-    ...(scheduledResult.success ? scheduledResult.data : [])
-  ];
-  
-  // Filter out past appointments and sort by date
-  const today = new Date().toISOString().split('T')[0];
-  return all
-    .filter(apt => apt.date >= today && apt.status !== 'completed' && apt.status !== 'cancelled')
-    .sort((a, b) => {
-      const dateCompare = (a.date || '').localeCompare(b.date || '');
-      if (dateCompare !== 0) return dateCompare;
-      return (a.time || '').localeCompare(b.time || '');
-    });
-}, [currentUser?.uid]);
+  const fetchUpcomingAppointments = useCallback(async () => {
+    if (!currentUser?.uid) return [];
+    const approvedResult = await getDoctorAppointmentsByStatus(currentUser.uid, 'approved');
+    const confirmedResult = await getDoctorAppointmentsByStatus(currentUser.uid, 'confirmed');
+    const scheduledResult = await getDoctorAppointmentsByStatus(currentUser.uid, 'scheduled');
+    
+    const all = [
+      ...(approvedResult.success ? approvedResult.data : []),
+      ...(confirmedResult.success ? confirmedResult.data : []),
+      ...(scheduledResult.success ? scheduledResult.data : [])
+    ];
+    
+    const today = new Date().toISOString().split('T')[0];
+    return all
+      .filter(apt => apt.date >= today && apt.status !== 'completed' && apt.status !== 'cancelled')
+      .sort((a, b) => {
+        const dateCompare = (a.date || '').localeCompare(b.date || '');
+        if (dateCompare !== 0) return dateCompare;
+        return (a.time || '').localeCompare(b.time || '');
+      });
+  }, [currentUser?.uid]);
 
-// Update fetchTodayAppointments to include multiple statuses
-const fetchTodayAppointments = useCallback(async () => {
-  if (!currentUser?.uid) return [];
-  // Get today's appointments with statuses that matter for doctor
-  const today = new Date().toISOString().split('T')[0];
-  
-  const statuses = ['approved', 'confirmed', 'checked-in', 'in-progress'];
-  let allAppointments = [];
-  
-  for (const status of statuses) {
-    const result = await getDoctorAppointmentsByStatus(currentUser.uid, status);
-    if (result.success) {
-      allAppointments = [...allAppointments, ...result.data];
+  const fetchTodayAppointments = useCallback(async () => {
+    if (!currentUser?.uid) return [];
+    const today = new Date().toISOString().split('T')[0];
+    
+    const statuses = ['approved', 'confirmed', 'checked-in', 'in-progress'];
+    let allAppointments = [];
+    
+    for (const status of statuses) {
+      const result = await getDoctorAppointmentsByStatus(currentUser.uid, status);
+      if (result.success) {
+        allAppointments = [...allAppointments, ...result.data];
+      }
     }
-  }
-  
-  // Filter for today and remove duplicates
-  const unique = allAppointments.filter((apt, index, self) => 
-    index === self.findIndex(a => a.id === apt.id) && apt.date === today
-  );
-  
-  return unique;
-}, [currentUser?.uid]);
+    
+    const unique = allAppointments.filter((apt, index, self) => 
+      index === self.findIndex(a => a.id === apt.id) && apt.date === today
+    );
+    
+    return unique;
+  }, [currentUser?.uid]);
 
   const fetchPastAppointments = useCallback(async () => {
     if (!currentUser?.uid) return [];
@@ -288,18 +240,6 @@ const fetchTodayAppointments = useCallback(async () => {
   const fetchPatients = useCallback(async () => {
     if (!currentUser?.uid) return [];
     const result = await getPatientsByDoctor(currentUser.uid);
-    return result.success ? result.data : [];
-  }, [currentUser?.uid]);
-
-  const fetchLabRequests = useCallback(async () => {
-    if (!currentUser?.uid) return [];
-    const result = await getLabRequestsByDoctor(currentUser.uid);
-    return result.success ? result.data : [];
-  }, [currentUser?.uid]);
-
-  const fetchOperations = useCallback(async () => {
-    if (!currentUser?.uid) return [];
-    const result = await getOperations({ doctorId: currentUser.uid });
     return result.success ? result.data : [];
   }, [currentUser?.uid]);
 
@@ -374,7 +314,6 @@ const fetchTodayAppointments = useCallback(async () => {
   useEffect(() => {
     if (!currentUser?.uid) return;
 
-    // Initial fetch
     fetchNotifications();
     fetchUnreadCounts();
     fetchAllUnreadCounts();
@@ -383,45 +322,44 @@ const fetchTodayAppointments = useCallback(async () => {
       fetchNotifications();
       fetchUnreadCounts();
       fetchAllUnreadCounts();
-    }, 30000); // Every 30 seconds
+    }, 30000);
 
     return () => clearInterval(interval);
   }, [currentUser?.uid, fetchNotifications, fetchUnreadCounts, fetchAllUnreadCounts]);
 
   const loadRatings = useCallback(async () => {
-  if (!currentUser?.uid) return;
-  setLoadingRatings(true);
-  try {
-    const result = await getDoctorRatingsWithPatients(currentUser.uid);
-    if (result.success) {
-      setRatingsData(result.data);
-      
-      // Calculate stats
-      const total = result.data.length;
-      const sum = result.data.reduce((acc, r) => acc + (r.rating || 0), 0);
-      const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-      result.data.forEach(r => {
-        if (r.rating >= 1 && r.rating <= 5) distribution[r.rating]++;
-      });
-      
-      setRatingStats({
-        average: total > 0 ? sum / total : 0,
-        total,
-        distribution
-      });
+    if (!currentUser?.uid) return;
+    setLoadingRatings(true);
+    try {
+      const result = await getDoctorRatingsWithPatients(currentUser.uid);
+      if (result.success) {
+        setRatingsData(result.data);
+        
+        const total = result.data.length;
+        const sum = result.data.reduce((acc, r) => acc + (r.rating || 0), 0);
+        const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+        result.data.forEach(r => {
+          if (r.rating >= 1 && r.rating <= 5) distribution[r.rating]++;
+        });
+        
+        setRatingStats({
+          average: total > 0 ? sum / total : 0,
+          total,
+          distribution
+        });
+      }
+    } catch (error) {
+      console.error('Error loading ratings:', error);
+    } finally {
+      setLoadingRatings(false);
     }
-  } catch (error) {
-    console.error('Error loading ratings:', error);
-  } finally {
-    setLoadingRatings(false);
-  }
-}, [currentUser?.uid]);
+  }, [currentUser?.uid]);
 
-useEffect(() => {
-  if (activeTab === 'ratings') {
-    loadRatings();
-  }
-}, [activeTab, loadRatings]);
+  useEffect(() => {
+    if (activeTab === 'ratings') {
+      loadRatings();
+    }
+  }, [activeTab, loadRatings]);
 
   // Load profile when settings modal opens
   useEffect(() => {
@@ -442,8 +380,6 @@ useEffect(() => {
         pastApps,
         visitsData,
         patientsData,
-        labData,
-        opsData,
         perfData,
         ratingsData,
         unreadData
@@ -453,8 +389,6 @@ useEffect(() => {
         fetchPastAppointments(),
         fetchVisits(),
         fetchPatients(),
-        fetchLabRequests(),
-        fetchOperations(),
         fetchPerformance(),
         fetchRatings(),
         getUnreadMessageCount(currentUser.uid)
@@ -470,17 +404,9 @@ useEffect(() => {
           ...(pastApps.status === 'fulfilled' ? pastApps.value : [])
         ]
       });
-      
-      console.log('Appointments loaded:', {
-        today: todayApps.status === 'fulfilled' ? todayApps.value.length : 0,
-        upcoming: upcomingApps.status === 'fulfilled' ? upcomingApps.value.length : 0,
-        past: pastApps.status === 'fulfilled' ? pastApps.value.length : 0
-      });
 
       setVisits(visitsData.status === 'fulfilled' ? visitsData.value : []);
       setPatients(patientsData.status === 'fulfilled' ? patientsData.value : []);
-      setLabRequests(labData.status === 'fulfilled' ? labData.value : []);
-      setOperations(opsData.status === 'fulfilled' ? opsData.value : []);
       setPerformance(perfData.status === 'fulfilled' ? perfData.value : null);
       setRatings(ratingsData.status === 'fulfilled' ? ratingsData.value : []);
       
@@ -494,8 +420,8 @@ useEffect(() => {
       setLoading(false);
     }
   }, [currentUser?.uid, fetchTodayAppointments, fetchUpcomingAppointments, 
-      fetchPastAppointments, fetchVisits, fetchPatients, fetchLabRequests, 
-      fetchOperations, fetchPerformance, fetchRatings]);
+      fetchPastAppointments, fetchVisits, fetchPatients, 
+      fetchPerformance, fetchRatings]);
 
   // Load data based on active tab
   useEffect(() => {
@@ -517,13 +443,6 @@ useEffect(() => {
                 fetchPastAppointments()
               ]);
               
-              console.log('Appointments loaded for tab:', {
-                all: all.status === 'fulfilled' ? all.value.length : 0,
-                today: today.status === 'fulfilled' ? today.value.length : 0,
-                upcoming: upcoming.status === 'fulfilled' ? upcoming.value.length : 0,
-                past: past.status === 'fulfilled' ? past.value.length : 0
-              });
-              
               setAppointments({
                 today: today.status === 'fulfilled' ? today.value : [],
                 upcoming: upcoming.status === 'fulfilled' ? upcoming.value : [],
@@ -544,18 +463,6 @@ useEffect(() => {
               setVisits(visitsData);
               break;
             }
-          case 'lab-requests':
-            {
-              const labData = await fetchLabRequests();
-              setLabRequests(labData);
-              break;
-            }
-          case 'operations':
-            {
-              const opsData = await fetchOperations();
-              setOperations(opsData);
-              break;
-            }
           default:
             break;
         }
@@ -570,77 +477,69 @@ useEffect(() => {
     loadTabData();
   }, [activeTab, currentUser?.uid, loadDashboardData, fetchAllAppointments,
       fetchTodayAppointments, fetchUpcomingAppointments, fetchPastAppointments, 
-      fetchPatients, fetchVisits, fetchLabRequests, fetchOperations]);
+      fetchPatients, fetchVisits]);
 
   // ==================== HANDLER FUNCTIONS ====================
 
-  // Profile image upload handler
-const handleProfileImageUpload = async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
+  const handleProfileImageUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
 
-  // Validate file type
-  const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
-  if (!allowedTypes.includes(file.type)) {
-    toast.error('Please upload an image file (JPEG, PNG, GIF, WEBP)');
-    return;
-  }
-
-  // Validate file size (2MB max for profile images)
-  if (file.size > 2 * 1024 * 1024) {
-    toast.error('Image size should be less than 2MB');
-    return;
-  }
-
-  // Convert to base64
-  const reader = new FileReader();
-  reader.readAsDataURL(file);
-  reader.onload = () => {
-    setProfileForm(prev => ({ ...prev, profileImage: reader.result }));
-    toast.success('Profile picture added');
-  };
-  reader.onerror = (error) => {
-    console.error('Error converting image:', error);
-    toast.error('Failed to process image');
-  };
-};
-
-// Remove profile image handler
-const handleRemoveProfileImage = () => {
-  setProfileForm(prev => ({ ...prev, profileImage: null }));
-  toast.success('Profile picture removed');
-};
-
-// Update the handleChatWithPatient function to work with all relevant statuses
-const handleChatWithPatient = useCallback(async (patientId, patientName) => {
-  if (!currentUser?.uid || !patientId) {
-    toast.error('Cannot start chat: Missing user information');
-    return;
-  }
-  
-  // Chat should be available after payment confirmation
-  setLoading(true);
-  try {
-    const result = await createOrGetChat(currentUser.uid, patientId);
-    
-    if (result.success) {
-      setChatWith({ id: patientId, fullName: patientName });
-      setShowChat(true);
-    } else {
-      toast.error(result.error || 'Failed to start chat');
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    if (!allowedTypes.includes(file.type)) {
+      toast.error('Please upload an image file (JPEG, PNG, GIF, WEBP)');
+      return;
     }
-  } catch (error) {
-    console.error('Error starting chat:', error);
-    toast.error('Failed to start chat');
-  } finally {
-    setLoading(false);
-  }
-}, [currentUser?.uid]);
+
+    if (file.size > 2 * 1024 * 1024) {
+      toast.error('Image size should be less than 2MB');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => {
+      setProfileForm(prev => ({ ...prev, profileImage: reader.result }));
+      toast.success('Profile picture added');
+    };
+    reader.onerror = (error) => {
+      console.error('Error converting image:', error);
+      toast.error('Failed to process image');
+    };
+  };
+
+  const handleRemoveProfileImage = () => {
+    setProfileForm(prev => ({ ...prev, profileImage: null }));
+    toast.success('Profile picture removed');
+  };
+
+  const handleChatWithPatient = useCallback(async (patientId, patientName) => {
+    if (!currentUser?.uid || !patientId) {
+      toast.error('Cannot start chat: Missing user information');
+      return;
+    }
+    
+    setLoading(true);
+    try {
+      const result = await createOrGetChat(currentUser.uid, patientId);
+      
+      if (result.success) {
+        setChatWith({ id: patientId, fullName: patientName });
+        setShowChat(true);
+      } else {
+        toast.error(result.error || 'Failed to start chat');
+      }
+    } catch (error) {
+      console.error('Error starting chat:', error);
+      toast.error('Failed to start chat');
+    } finally {
+      setLoading(false);
+    }
+  }, [currentUser?.uid]);
 
   const handleProfileUpdate = async () => {
     setLoading(true);
     try {
-      // Validate required fields
       if (!profileForm.fullName || !profileForm.email || !profileForm.phone) {
         toast.error('Please fill in all required fields');
         setLoading(false);
@@ -663,82 +562,57 @@ const handleChatWithPatient = useCallback(async (patientId, patientName) => {
   };
 
 const handleStartConsultation = async (appointment) => {
-  setLoading(true);
+  setSelectedAppointmentForConsultation(appointment);
   
-  try {
-    // Check if patient can be seen (status should be confirmed, checked-in, or approved)
-    const canStart = appointment.status === 'confirmed' || 
-                     appointment.status === 'checked-in' || 
-                     appointment.status === 'approved';
-    
-    if (!canStart) {
-      toast.error('Patient must be confirmed before starting consultation');
-      setLoading(false);
-      return;
+  // Get patient details if not already present
+  if (appointment.patientId && !appointment.patient) {
+    try {
+      const { getUserById } = await import('../database');
+      const result = await getUserById(appointment.patientId);
+      if (result.success) {
+        appointment.patient = result.data;
+      }
+    } catch (error) {
+      console.error('Error fetching patient:', error);
     }
-    
-    // Check if there's already an active visit
-    const activeVisit = visits.find(v => 
-      v.patientId === appointment.patientId && v.status === 'active'
-    );
-    
-    if (activeVisit) {
-      setSelectedVisit(activeVisit);
-      setSelectedPatient({ 
-        id: appointment.patientId, 
-        fullName: appointment.patientName || appointment.patient?.fullName
-      });
-      setShowEMRForm(true);
-      toast.success('Continuing existing consultation');
-      setLoading(false);
-      return;
-    }
+  }
+  
+  setShowConsultationNotesModal(true);
+};
 
-    const visitData = {
-      patientId: appointment.patientId,
-      doctorId: currentUser.uid,
-      appointmentId: appointment.id,
-      department: appointment.department,
-      status: 'active',
-      vitals: {},
-      chiefComplaint: appointment.reason || '',
-      symptoms: '',
-      diagnosis: '',
-      notes: [],
-      icdCodes: [],
-      createdAt: new Date()
-    };
-
-    const result = await createVisit(visitData);
+// Add handler for consultation success
+const handleConsultationSuccess = async () => {
+  toast.success('Consultation saved successfully!');
+  
+  // Refresh visits and appointments
+  await Promise.all([
+    fetchVisits(),
+    fetchTodayAppointments(),
+    fetchPatients()
+  ]);
+  
+  // Refresh the appointments in the current tab
+  if (activeTab === 'appointments') {
+    const [all, today, upcoming, past] = await Promise.allSettled([
+      fetchAllAppointments(),
+      fetchTodayAppointments(),
+      fetchUpcomingAppointments(),
+      fetchPastAppointments()
+    ]);
     
-    if (result.success) {
-      setSelectedVisit(result.data);
-      setSelectedPatient({ 
-        id: appointment.patientId, 
-        fullName: appointment.patientName || appointment.patient?.fullName
-      });
-      setShowEMRForm(true);
-      toast.success('Consultation started');
-      
-      // Update appointment status to in-progress
-      const updatedToday = appointments.today.map(apt => 
-        apt.id === appointment.id 
-          ? { ...apt, status: 'in-progress' } 
-          : apt
-      );
-      setAppointments(prev => ({ ...prev, today: updatedToday }));
-    } else {
-      toast.error(result.error);
-    }
-  } catch (error) {
-    console.error('Start consultation error:', error);
-    toast.error('Failed to start consultation');
-  } finally {
-    setLoading(false);
+    setAppointments({
+      today: today.status === 'fulfilled' ? today.value : [],
+      upcoming: upcoming.status === 'fulfilled' ? upcoming.value : [],
+      past: past.status === 'fulfilled' ? past.value : [],
+      all: all.status === 'fulfilled' ? all.value : []
+    });
+  }
+  
+  if (activeTab === 'dashboard') {
+    await loadDashboardData();
   }
 };
 
-  // Handle saving EMR
   const handleSaveEMR = async (emrData) => {
     if (!selectedVisit) return;
 
@@ -758,7 +632,6 @@ const handleStartConsultation = async (appointment) => {
         toast.success('EMR updated successfully');
         setShowEMRForm(false);
         
-        // Refresh visits
         const visitsData = await fetchVisits();
         setVisits(visitsData);
         
@@ -775,7 +648,6 @@ const handleStartConsultation = async (appointment) => {
     }
   };
 
-  // Handle adding prescription
   const handleAddPrescription = async () => {
     if (!selectedVisit) return;
 
@@ -808,7 +680,6 @@ const handleStartConsultation = async (appointment) => {
           notes: ''
         });
         
-        // Refresh visits to show new prescription
         const visitsData = await fetchVisits();
         setVisits(visitsData);
       } else {
@@ -822,156 +693,6 @@ const handleStartConsultation = async (appointment) => {
     }
   };
 
-  // Handle creating lab request
-  const handleCreateLabRequest = async () => {
-    if (!labRequest.patientId || labRequest.tests.length === 0) {
-      toast.error('Please select patient and add at least one test');
-      return;
-    }
-
-    // Filter out empty test names
-    const validTests = labRequest.tests.filter(test => test.name.trim() !== '');
-    if (validTests.length === 0) {
-      toast.error('Please add at least one valid test');
-      return;
-    }
-
-    setLoading(true);
-    
-    try {
-      const result = await createLabRequest({
-        ...labRequest,
-        tests: validTests,
-        doctorId: currentUser.uid,
-        doctorName: userDetails?.fullName,
-        status: 'pending',
-        requestedAt: new Date()
-      });
-      
-      if (result.success) {
-        toast.success('Lab request created successfully');
-        setShowLabRequestForm(false);
-        setLabRequest({
-          patientId: '',
-          patientName: '',
-          tests: [{ name: '', instructions: '' }],
-          priority: 'normal',
-          notes: ''
-        });
-        
-        // Refresh lab requests
-        const labData = await fetchLabRequests();
-        setLabRequests(labData);
-      } else {
-        toast.error(result.error);
-      }
-    } catch (error) {
-      console.error('Create lab request error:', error);
-      toast.error('Failed to create lab request');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Handle scheduling operation
-  const handleScheduleOperation = async () => {
-    const validation = validateOperation(operation);
-    if (!validation.isValid) {
-      const firstError = Object.values(validation.errors)[0];
-      toast.error(firstError);
-      return;
-    }
-
-    setLoading(true);
-    
-    try {
-      const result = await scheduleOperation(operation, currentUser.uid);
-      
-      if (result.success) {
-        toast.success('Operation scheduled successfully');
-        setShowOperationForm(false);
-        setOperation({
-          patientId: '',
-          patientName: '',
-          operationType: '',
-          requiredEquipment: [],
-          requiredStaff: [],
-          scheduledDate: '',
-          estimatedDuration: '',
-          notes: '',
-          checklist: {
-            consentConfirmed: false,
-            equipmentConfirmed: false,
-            staffConfirmed: false,
-            riskAcknowledged: false
-          }
-        });
-        
-        // Refresh operations
-        const opsData = await fetchOperations();
-        setOperations(opsData);
-      } else {
-        toast.error(result.error);
-      }
-    } catch (error) {
-      console.error('Schedule operation error:', error);
-      toast.error('Failed to schedule operation');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Handle confirming operation checklist
-  const handleConfirmChecklist = async (operationId, item) => {
-    setLoading(true);
-    
-    try {
-      const result = await confirmOperationChecklist(operationId, item, currentUser.uid);
-      
-      if (result.success) {
-        toast.success(`${item} confirmed`);
-        
-        // Refresh operations
-        const opsData = await fetchOperations();
-        setOperations(opsData);
-      } else {
-        toast.error(result.error);
-      }
-    } catch (error) {
-      console.error('Confirm checklist error:', error);
-      toast.error('Failed to confirm checklist item');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Handle starting operation
-  const handleStartOperation = async (operationId) => {
-    if (!window.confirm('Are you sure you want to start this operation?')) return;
-
-    setLoading(true);
-    
-    try {
-      const result = await startOperation(operationId, currentUser.uid);
-      
-      if (result.success) {
-        toast.success('Operation started');
-        
-        // Refresh operations
-        const opsData = await fetchOperations();
-        setOperations(opsData);
-      } else {
-        toast.error(result.error);
-      }
-    } catch (error) {
-      console.error('Start operation error:', error);
-      toast.error('Failed to start operation');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Handle completing visit
   const handleCompleteVisit = async (visitId) => {
     if (!window.confirm('Complete this visit and generate invoice?')) return;
 
@@ -983,15 +704,12 @@ const handleStartConsultation = async (appointment) => {
       if (result.success) {
         toast.success('Visit completed successfully. Invoice generated.');
         
-        // Refresh visits
         const visitsData = await fetchVisits();
         setVisits(visitsData);
         
-        // Refresh appointments
         const todayApps = await fetchTodayAppointments();
         setAppointments(prev => ({ ...prev, today: todayApps }));
         
-        // Notify patient
         const visit = visits.find(v => v.id === visitId);
         if (visit) {
           await sendNotification({
@@ -1014,7 +732,6 @@ const handleStartConsultation = async (appointment) => {
     }
   };
 
-  // Handle discharging patient
   const handleDischarge = async (visitId) => {
     if (!window.confirm('Are you sure you want to discharge this patient?')) {
       return;
@@ -1030,11 +747,9 @@ const handleStartConsultation = async (appointment) => {
       if (result.success) {
         toast.success('Patient discharged successfully');
         
-        // Refresh visits
         const visitsData = await fetchVisits();
         setVisits(visitsData);
         
-        // Refresh appointments
         const todayApps = await fetchTodayAppointments();
         setAppointments(prev => ({ ...prev, today: todayApps }));
       } else {
@@ -1048,44 +763,13 @@ const handleStartConsultation = async (appointment) => {
     }
   };
 
-  // Handle viewing lab results
-  const handleViewLabResults = async (labRequestId) => {
-    setLoading(true);
-    
-    try {
-      // Get the lab request details
-      const labRequest = labRequests.find(lr => lr.id === labRequestId);
-      if (labRequest?.results) {
-        setSelectedLabResult(labRequest);
-        setShowLabResults(true);
-      }
-    } catch (error) {
-      console.error('View lab results error:', error);
-      toast.error('Failed to load lab results');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Handle downloading lab report
-  const handleDownloadLabReport = (fileData, fileName) => {
-    const link = document.createElement('a');
-    link.href = `data:application/pdf;base64,${fileData}`;
-    link.download = fileName;
-    link.click();
-    toast.success('Download started');
-  };
-
-  // Handle viewing appointment details
   const handleViewAppointmentDetails = async (appointment) => {
     setLoading(true);
     try {
-      // If we have the full appointment object with patient details, use it
       if (appointment.patient) {
         setSelectedAppointment(appointment);
         setShowAppointmentDetails(true);
       } else {
-        // Otherwise fetch the full details
         const result = await getAppointmentById(appointment.id);
         if (result.success) {
           setSelectedAppointment(result.data);
@@ -1102,7 +786,6 @@ const handleStartConsultation = async (appointment) => {
     }
   };
 
-  // Handle prescription medicine management
   const handleAddMedicine = () => {
     setPrescription(prev => ({
       ...prev,
@@ -1132,31 +815,6 @@ const handleStartConsultation = async (appointment) => {
     }));
   };
 
-  // Handle lab test management
-  const handleAddTest = () => {
-    setLabRequest(prev => ({
-      ...prev,
-      tests: [...prev.tests, { name: '', instructions: '' }]
-    }));
-  };
-
-  const handleRemoveTest = (index) => {
-    setLabRequest(prev => ({
-      ...prev,
-      tests: prev.tests.filter((_, i) => i !== index)
-    }));
-  };
-
-  const handleTestChange = (index, field, value) => {
-    setLabRequest(prev => ({
-      ...prev,
-      tests: prev.tests.map((test, i) => 
-        i === index ? { ...test, [field]: value } : test
-      )
-    }));
-  };
-
-  // Handle logout
   const handleLogout = async () => {
     try {
       await logoutUser(currentUser.uid);
@@ -1167,7 +825,6 @@ const handleStartConsultation = async (appointment) => {
     }
   };
 
-  // Load patient history
   const loadPatientHistory = async (patientId) => {
     setLoading(true);
     const result = await getPatientMedicalHistory(patientId);
@@ -1182,7 +839,6 @@ const handleStartConsultation = async (appointment) => {
 
   // ==================== HELPER FUNCTIONS ====================
 
-  // Get status badge
   const getStatusBadge = (status) => {
     const config = {
       'scheduled': { color: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200', icon: faClock, label: 'Scheduled' },
@@ -1204,39 +860,19 @@ const handleStartConsultation = async (appointment) => {
     );
   };
 
-  // Get lab status badge
-  const getLabStatusBadge = (status) => {
-    const config = {
-      'pending': { color: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200', icon: faClock },
-      'in-progress': { color: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200', icon: faHourglassHalf },
-      'completed': { color: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200', icon: faCheckCircle }
-    };
-    
-    const conf = config[status] || config.pending;
-    return (
-      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${conf.color}`}>
-        <FontAwesomeIcon icon={conf.icon} className="mr-1" />
-        {status}
-      </span>
-    );
-  };
-
   // ==================== TABS ====================
-
+  // REMOVED: lab-requests, operations tabs
   const tabs = [
     { id: 'dashboard', label: 'Dashboard', icon: faChartLine },
     { id: 'appointments', label: 'Appointments', icon: faCalendarCheck },
     { id: 'patients', label: 'Patients', icon: faUserInjured },
     { id: 'visits', label: 'Active Visits', icon: faFileMedical },
-    { id: 'lab-requests', label: 'Lab Requests', icon: faFlask },
-    { id: 'operations', label: 'Operations', icon: faStethoscope },
-     { id: 'ratings', label: 'Ratings & Reviews', icon: faStar },
+    { id: 'ratings', label: 'Ratings & Reviews', icon: faStar },
     { id: 'chats', label: 'Chats', icon: faMessage }
   ];
 
   // ==================== RENDER FUNCTIONS ====================
 
-  // Render Dashboard
   const renderDashboard = () => (
     <div className="space-y-6">
       {/* Welcome Section */}
@@ -1276,24 +912,6 @@ const handleStartConsultation = async (appointment) => {
           </div>
         </div>
 
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-lg transition cursor-pointer"
-             onClick={() => setActiveTab('lab-requests')}>
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm text-gray-600 dark:text-gray-400">Pending Lab Results</p>
-              <p className="text-3xl font-bold text-gray-900 dark:text-white">
-                {labRequests.filter(l => l.status === 'pending').length}
-              </p>
-            </div>
-            <div className="p-3 bg-yellow-100 dark:bg-yellow-900 rounded-full">
-              <FontAwesomeIcon icon={faFlask} className="h-6 w-6 text-yellow-600 dark:text-yellow-400" />
-            </div>
-          </div>
-          <div className="mt-3 flex items-center text-sm">
-            <span className="text-yellow-600 mr-2">{labRequests.filter(l => l.status === 'in-progress').length} in progress</span>
-          </div>
-        </div>
-
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-lg transition">
           <div className="flex items-center justify-between">
             <div>
@@ -1308,6 +926,23 @@ const handleStartConsultation = async (appointment) => {
           </div>
           <div className="mt-3 text-sm text-gray-600">
             From {Object.keys(unreadMessages).length} chats
+          </div>
+        </div>
+
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-lg transition">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600 dark:text-gray-400">Active Visits</p>
+              <p className="text-3xl font-bold text-gray-900 dark:text-white">
+                {visits.filter(v => v.status === 'active').length}
+              </p>
+            </div>
+            <div className="p-3 bg-yellow-100 dark:bg-yellow-900 rounded-full">
+              <FontAwesomeIcon icon={faFileMedical} className="h-6 w-6 text-yellow-600 dark:text-yellow-400" />
+            </div>
+          </div>
+          <div className="mt-3 text-sm text-gray-600">
+            In consultation
           </div>
         </div>
 
@@ -1345,7 +980,7 @@ const handleStartConsultation = async (appointment) => {
       {/* Quick Actions */}
       <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6">
         <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Quick Actions</h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
           <button
             onClick={() => {
               if (appointments.today.length > 0) {
@@ -1369,389 +1004,286 @@ const handleStartConsultation = async (appointment) => {
           </button>
 
           <button
-            onClick={() => setShowLabRequestForm(true)}
-            className="p-4 bg-yellow-50 dark:bg-yellow-900 rounded-lg hover:bg-yellow-100 dark:hover:bg-yellow-800 transition text-center group"
+            onClick={() => setActiveTab('appointments')}
+            className="p-4 bg-blue-50 dark:bg-blue-900 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-800 transition text-center group"
           >
-            <FontAwesomeIcon icon={faFlask} className="h-6 w-6 text-yellow-600 dark:text-yellow-400 mb-2 group-hover:scale-110 transition" />
-            <p className="text-sm font-medium text-gray-900 dark:text-white">Request Lab Test</p>
-          </button>
-
-          <button
-            onClick={() => setShowOperationForm(true)}
-            className="p-4 bg-red-50 dark:bg-red-900 rounded-lg hover:bg-red-100 dark:hover:bg-red-800 transition text-center group"
-          >
-            <FontAwesomeIcon icon={faStethoscope} className="h-6 w-6 text-red-600 dark:text-red-400 mb-2 group-hover:scale-110 transition" />
-            <p className="text-sm font-medium text-gray-900 dark:text-white">Schedule Operation</p>
+            <FontAwesomeIcon icon={faCalendarCheck} className="h-6 w-6 text-blue-600 dark:text-blue-400 mb-2 group-hover:scale-110 transition" />
+            <p className="text-sm font-medium text-gray-900 dark:text-white">View Appointments</p>
           </button>
         </div>
       </div>
 
-      {/* Today's Schedule and Recent Lab Results */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Today's Schedule */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
-          <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Today's Schedule</h3>
-            <button
-              onClick={() => setActiveTab('appointments')}
-              className="text-sm text-teal-600 hover:text-teal-700 flex items-center"
-            >
-              View All <FontAwesomeIcon icon={faChevronRight} className="ml-1 h-3 w-3" />
-            </button>
-          </div>
-          <div className="p-6">
-            {appointments.today.length === 0 ? (
-              <div className="text-center py-8">
-                <FontAwesomeIcon icon={faCalendarCheck} className="h-12 w-12 text-gray-400 mb-3" />
-                <p className="text-gray-600 dark:text-gray-400">No appointments scheduled for today</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {appointments.today.slice(0, 5).map((apt) => (
-                  <div key={apt.id} className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition">
-                    <div className="flex items-center space-x-4">
-                      <div className="w-12 h-12 bg-teal-100 dark:bg-teal-900 rounded-full flex items-center justify-center">
-                        <FontAwesomeIcon icon={faUserInjured} className="h-6 w-6 text-teal-600 dark:text-teal-400" />
-                      </div>
-                      <div>
-                        <p className="font-medium text-gray-900 dark:text-white">{apt.patient?.fullName || apt.patientName}</p>
-                        <div className="flex items-center text-sm text-gray-600 dark:text-gray-400">
-                          <FontAwesomeIcon icon={faClock} className="mr-1 h-3 w-3" />
-                          {apt.time}
-                          <span className="mx-2">•</span>
-                          {apt.reason?.substring(0, 30)}{apt.reason?.length > 30 ? '...' : ''}
-                        </div>
-                        <div className="mt-1">
-                          {getStatusBadge(apt.status)}
-                        </div>
-                      </div>
+      {/* Today's Schedule */}
+      <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
+        <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
+          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Today's Schedule</h3>
+          <button
+            onClick={() => setActiveTab('appointments')}
+            className="text-sm text-teal-600 hover:text-teal-700 flex items-center"
+          >
+            View All <FontAwesomeIcon icon={faChevronRight} className="ml-1 h-3 w-3" />
+          </button>
+        </div>
+        <div className="p-6">
+          {appointments.today.length === 0 ? (
+            <div className="text-center py-8">
+              <FontAwesomeIcon icon={faCalendarCheck} className="h-12 w-12 text-gray-400 mb-3" />
+              <p className="text-gray-600 dark:text-gray-400">No appointments scheduled for today</p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {appointments.today.slice(0, 5).map((apt) => (
+                <div key={apt.id} className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition">
+                  <div className="flex items-center space-x-4">
+                    <div className="w-12 h-12 bg-teal-100 dark:bg-teal-900 rounded-full flex items-center justify-center">
+                      <FontAwesomeIcon icon={faUserInjured} className="h-6 w-6 text-teal-600 dark:text-teal-400" />
                     </div>
-                    <div className="flex space-x-2">
-                      <button
-                        onClick={() => handleStartConsultation(apt)}
-                        className="px-3 py-1 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition text-sm"
-                        disabled={apt.status !== 'checked-in'}
-                      >
-                        {apt.status === 'checked-in' ? 'Start' : 'Waiting'}
-                      </button>
-                      <button
-                        onClick={() => {
-                          handleChatWithPatient(apt.patientId, apt.patient?.fullName || apt.patientName);
-                        }}
-                        className="px-3 py-1 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm"
-                        title="Chat with patient"
-                        disabled={!apt.patientId}
-                      >
-                        <FontAwesomeIcon icon={faMessage} className="mr-1" />
-                        Chat
-                      </button>
-                      <button
-                        onClick={() => handleViewAppointmentDetails(apt)}
-                        className="p-2 text-gray-600 hover:bg-gray-200 dark:text-gray-400 dark:hover:bg-gray-600 rounded-lg"
-                      >
-                        <FontAwesomeIcon icon={faEye} />
-                      </button>
+                    <div>
+                      <p className="font-medium text-gray-900 dark:text-white">{apt.patient?.fullName || apt.patientName}</p>
+                      <div className="flex items-center text-sm text-gray-600 dark:text-gray-400">
+                        <FontAwesomeIcon icon={faClock} className="mr-1 h-3 w-3" />
+                        {apt.time}
+                        <span className="mx-2">•</span>
+                        {apt.reason?.substring(0, 30)}{apt.reason?.length > 30 ? '...' : ''}
+                      </div>
+                      <div className="mt-1">
+                        {getStatusBadge(apt.status)}
+                      </div>
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Recent Lab Results */}
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
-          <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Recent Lab Results</h3>
-            <button
-              onClick={() => setActiveTab('lab-requests')}
-              className="text-sm text-teal-600 hover:text-teal-700 flex items-center"
-            >
-              View All <FontAwesomeIcon icon={faChevronRight} className="ml-1 h-3 w-3" />
-            </button>
-          </div>
-          <div className="p-6">
-            {labRequests.filter(l => l.status === 'completed').length === 0 ? (
-              <div className="text-center py-8">
-                <FontAwesomeIcon icon={faFlask} className="h-12 w-12 text-gray-400 mb-3" />
-                <p className="text-gray-600 dark:text-gray-400">No recent lab results</p>
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {labRequests.filter(l => l.status === 'completed').slice(0, 5).map((req) => (
-                  <div key={req.id} className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition">
-                    <div>
-                      <p className="font-medium text-gray-900 dark:text-white">{req.patientName}</p>
-                      <p className="text-sm text-gray-600 dark:text-gray-400">
-                        {req.tests?.map(t => t.name).join(', ')}
-                      </p>
-                      <p className="text-xs text-gray-500 mt-1">
-                        Completed: {formatDate(req.completedAt)}
-                      </p>
-                    </div>
+                  <div className="flex space-x-2">
                     <button
-                      onClick={() => handleViewLabResults(req.id)}
+                      onClick={() => handleStartConsultation(apt)}
                       className="px-3 py-1 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition text-sm"
+                      disabled={apt.status !== 'checked-in' && apt.status !== 'confirmed'}
                     >
-                      View
+                      {apt.status === 'checked-in' || apt.status === 'confirmed' ? 'Start' : 'Waiting'}
+                    </button>
+                    <button
+                      onClick={() => {
+                        handleChatWithPatient(apt.patientId, apt.patient?.fullName || apt.patientName);
+                      }}
+                      className="px-3 py-1 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm"
+                      title="Chat with patient"
+                      disabled={!apt.patientId}
+                    >
+                      <FontAwesomeIcon icon={faMessage} className="mr-1" />
+                      Chat
+                    </button>
+                    <button
+                      onClick={() => handleViewAppointmentDetails(apt)}
+                      className="p-2 text-gray-600 hover:bg-gray-200 dark:text-gray-400 dark:hover:bg-gray-600 rounded-lg"
+                    >
+                      <FontAwesomeIcon icon={faEye} />
                     </button>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Upcoming Operations */}
-      {operations.filter(o => o.status === 'scheduled').length > 0 && (
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
-          <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Upcoming Operations</h3>
-            <button
-              onClick={() => setActiveTab('operations')}
-              className="text-sm text-teal-600 hover:text-teal-700 flex items-center"
-            >
-              View All <FontAwesomeIcon icon={faChevronRight} className="ml-1 h-3 w-3" />
-            </button>
-          </div>
-          <div className="p-6">
-            <div className="space-y-4">
-              {operations.filter(o => o.status === 'scheduled').slice(0, 3).map((op) => (
-                <div key={op.id} className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition">
-                  <div>
-                    <p className="font-medium text-gray-900 dark:text-white">{op.patientName}</p>
-                    <p className="text-sm text-gray-600 dark:text-gray-400">
-                      {op.operationType} • {formatDate(op.scheduledDate)}
-                    </p>
-                  </div>
-                  <span className="px-3 py-1 bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 rounded-full text-sm">
-                    Scheduled
-                  </span>
                 </div>
               ))}
             </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-
-
-const renderAppointments = () => {
-  // Combine all appointments from different categories
-  const allAppointments = [
-    ...(appointments.today || []),
-    ...(appointments.upcoming || []),
-    ...(appointments.past || [])
-  ].filter(apt => apt && apt.id);
-
-  // Remove duplicates by ID
-  const uniqueAppointments = allAppointments.reduce((acc, current) => {
-    const exists = acc.find(item => item.id === current.id);
-    if (!exists) {
-      return [...acc, current];
-    }
-    return acc;
-  }, []);
-
-  // Ensure each appointment has required fields for AppointmentCard
-  const enrichedAppointments = uniqueAppointments.map(apt => ({
-    ...apt,
-    patientName: apt.patientName || apt.patient?.fullName || 'Unknown',
-    doctorName: apt.doctorName || userDetails?.fullName || 'Unknown',
-    doctorId: apt.doctorId || currentUser?.uid,
-    patientId: apt.patientId,
-    status: apt.status || 'pending',
-    paymentStatus: apt.paymentStatus || 'pending',
-    paymentAmount: apt.paymentAmount || apt.consultationFee || 1000,
-    isEmergency: apt.isEmergency || false,
-    date: apt.date,
-    time: apt.time,
-    reason: apt.reason || apt.chiefComplaint || '',
-    visitId: apt.visitId // Make sure visitId is passed
-  }));
-
-  console.log('Doctor appointments - enriched:', enrichedAppointments.map(a => ({ id: a.id, status: a.status, visitId: a.visitId })));
-
-  return (
-    <AppointmentList
-      appointments={enrichedAppointments}
-      role="doctor"
-      title="My Appointments"
-      onViewDetails={handleViewAppointmentDetails}
-      onChatWithDoctor={handleChatWithPatient}
-onMarkCompleted={async (appointmentId) => {
-  console.log('Mark completed called for appointment:', appointmentId);
-  // Find the appointment to get patient info
-  const apt = enrichedAppointments.find(a => a.id === appointmentId);
-  
-  if (!apt) {
-    toast.error('Appointment not found');
-    return;
-  }
-
-  setLoading(true);
-  try {
-    // Import the updateAppointmentStatus function from database
-    const { updateAppointmentStatus, completeVisit } = await import('../database');
-    
-    // Check if there's an active visit
-    const activeVisit = visits.find(v => 
-      v.patientId === apt.patientId && v.status === 'active'
-    );
-    
-    if (activeVisit) {
-      // If there's an active visit, complete it
-      await completeVisit(activeVisit.id, currentUser.uid);
-      toast.success('Visit completed successfully!');
-    } else {
-      // If no active visit, just update appointment status to completed
-      const result = await updateAppointmentStatus(apt.id, 'completed', currentUser.uid);
-      if (result.success) {
-        toast.success('Appointment marked as completed');
-      } else {
-        toast.error(result.error || 'Failed to complete appointment');
-      }
-    }
-    
-    // Refresh all data
-    await Promise.all([
-      fetchTodayAppointments(),
-      fetchUpcomingAppointments(),
-      fetchVisits(),
-      fetchPatients()
-    ]);
-    
-    // Refresh the appointments list for the current tab
-    if (activeTab === 'appointments') {
-      const [all, today, upcoming, past] = await Promise.allSettled([
-        fetchAllAppointments(),
-        fetchTodayAppointments(),
-        fetchUpcomingAppointments(),
-        fetchPastAppointments()
-      ]);
-      
-      setAppointments({
-        today: today.status === 'fulfilled' ? today.value : [],
-        upcoming: upcoming.status === 'fulfilled' ? upcoming.value : [],
-        past: past.status === 'fulfilled' ? past.value : [],
-        all: all.status === 'fulfilled' ? all.value : []
-      });
-    }
-    
-  } catch (error) {
-    console.error('Error completing appointment:', error);
-    toast.error('Failed to complete appointment');
-  } finally {
-    setLoading(false);
-  }
-}}
-      loading={loading}
-      showFilters={true}
-    />
-  );
-};
-
-// Update renderPatients in Doctor.js
-const renderPatients = () => {
-  // Ensure patients data is loaded properly
-  const filteredPatients = searchQuery 
-    ? patients.filter(p => 
-        p.fullName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        p.phone?.includes(searchQuery) ||
-        p.email?.toLowerCase().includes(searchQuery.toLowerCase())
-      )
-    : patients;
-
-  if (loading) {
-    return <div className="flex justify-center py-12"><FontAwesomeIcon icon={faSpinner} className="animate-spin text-2xl" /></div>;
-  }
-
-  return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold text-gray-900 dark:text-white">My Patients</h2>
-        <div className="w-64">
-          <SearchBar
-            onSearch={setSearchQuery}
-            placeholder="Search patients..."
-            data={patients}
-            searchKeys={['fullName', 'phone', 'cnic', 'email']}
-          />
+          )}
         </div>
       </div>
-
-      {!patients || patients.length === 0 ? (
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center">
-          <FontAwesomeIcon icon={faUsers} className="h-16 w-16 text-gray-400 mb-4" />
-          <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">No Patients Yet</h3>
-          <p className="text-gray-600 dark:text-gray-400">
-            Your patients will appear here after they have completed appointments with you.
-          </p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {filteredPatients.map((patient) => (
-            <div key={patient.id} className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden hover:shadow-lg transition">
-              <div className="p-6">
-                <div className="flex items-center mb-4">
-                  <div className="w-16 h-16 bg-gradient-to-br from-teal-400 to-teal-600 rounded-full flex items-center justify-center text-white font-bold text-xl">
-                    {patient.fullName?.charAt(0) || 'P'}
-                  </div>
-                  <div className="ml-4">
-                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{patient.fullName || 'Unknown'}</h3>
-                    <p className="text-sm text-gray-600 dark:text-gray-400">
-                      Age: {patient.age || 'N/A'} • {patient.bloodGroup || 'N/A'}
-                    </p>
-                  </div>
-                </div>
-                
-                <div className="space-y-2 mb-4">
-                  <p className="text-sm text-gray-600 dark:text-gray-400">
-                    <FontAwesomeIcon icon={faPhone} className="mr-2 h-3 w-3" />
-                    {patient.phone || 'N/A'}
-                  </p>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">
-                    <FontAwesomeIcon icon={faHistory} className="mr-2 h-3 w-3" />
-                    Last Visit: {patient.lastVisit ? formatDate(patient.lastVisit) : 'No visits yet'}
-                  </p>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">
-                    <FontAwesomeIcon icon={faFileMedical} className="mr-2 h-3 w-3" />
-                    Total Visits: {patient.visitCount || 0}
-                  </p>
-                </div>
-
-                <div className="flex space-x-2">
-                  <button
-                    onClick={() => loadPatientHistory(patient.id)}
-                    className="flex-1 px-3 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition text-sm"
-                  >
-                    View History
-                  </button>
-                  <button
-                    onClick={() => handleChatWithPatient(patient.id, patient.fullName)}
-                    className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition relative"
-                    title="Chat with patient"
-                  >
-                    <FontAwesomeIcon icon={faMessage} />
-                    {unreadMessages[patient.id] > 0 && (
-                      <span className="absolute -top-1 -right-1 bg-red-600 text-white text-xs rounded-full h-4 w-4 flex items-center justify-center">
-                        {unreadMessages[patient.id]}
-                      </span>
-                    )}
-                  </button>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
-};
 
-  // Render Visits
+  const renderAppointments = () => {
+    const allAppointments = [
+      ...(appointments.today || []),
+      ...(appointments.upcoming || []),
+      ...(appointments.past || [])
+    ].filter(apt => apt && apt.id);
+
+    const uniqueAppointments = allAppointments.reduce((acc, current) => {
+      const exists = acc.find(item => item.id === current.id);
+      if (!exists) {
+        return [...acc, current];
+      }
+      return acc;
+    }, []);
+
+    const enrichedAppointments = uniqueAppointments.map(apt => ({
+      ...apt,
+      patientName: apt.patientName || apt.patient?.fullName || 'Unknown',
+      doctorName: apt.doctorName || userDetails?.fullName || 'Unknown',
+      doctorId: apt.doctorId || currentUser?.uid,
+      patientId: apt.patientId,
+      status: apt.status || 'pending',
+      paymentStatus: apt.paymentStatus || 'pending',
+      paymentAmount: apt.paymentAmount || apt.consultationFee || 1000,
+      isEmergency: apt.isEmergency || false,
+      date: apt.date,
+      time: apt.time,
+      reason: apt.reason || apt.chiefComplaint || '',
+      visitId: apt.visitId
+    }));
+
+    return (
+      <AppointmentList
+        appointments={enrichedAppointments}
+        role="doctor"
+        title="My Appointments"
+        onViewDetails={handleViewAppointmentDetails}
+        onStartConsultation={handleStartConsultation}
+        onChatWithDoctor={handleChatWithPatient}
+        onMarkCompleted={async (appointmentId) => {
+          const apt = enrichedAppointments.find(a => a.id === appointmentId);
+          
+          if (!apt) {
+            toast.error('Appointment not found');
+            return;
+          }
+
+          setLoading(true);
+          try {
+            const activeVisit = visits.find(v => 
+              v.patientId === apt.patientId && v.status === 'active'
+            );
+            
+            if (activeVisit) {
+              await completeVisit(activeVisit.id, currentUser.uid);
+              toast.success('Visit completed successfully!');
+            } else {
+              const { updateAppointmentStatus } = await import('../database');
+              const result = await updateAppointmentStatus(apt.id, 'completed', currentUser.uid);
+              if (result.success) {
+                toast.success('Appointment marked as completed');
+              } else {
+                toast.error(result.error || 'Failed to complete appointment');
+              }
+            }
+            
+            await Promise.all([
+              fetchTodayAppointments(),
+              fetchUpcomingAppointments(),
+              fetchVisits(),
+              fetchPatients()
+            ]);
+            
+            if (activeTab === 'appointments') {
+              const [all, today, upcoming, past] = await Promise.allSettled([
+                fetchAllAppointments(),
+                fetchTodayAppointments(),
+                fetchUpcomingAppointments(),
+                fetchPastAppointments()
+              ]);
+              
+              setAppointments({
+                today: today.status === 'fulfilled' ? today.value : [],
+                upcoming: upcoming.status === 'fulfilled' ? upcoming.value : [],
+                past: past.status === 'fulfilled' ? past.value : [],
+                all: all.status === 'fulfilled' ? all.value : []
+              });
+            }
+            
+          } catch (error) {
+            console.error('Error completing appointment:', error);
+            toast.error('Failed to complete appointment');
+          } finally {
+            setLoading(false);
+          }
+        }}
+        loading={loading}
+        showFilters={true}
+      />
+    );
+  };
+
+  const renderPatients = () => {
+    const filteredPatients = searchQuery 
+      ? patients.filter(p => 
+          p.fullName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          p.phone?.includes(searchQuery) ||
+          p.email?.toLowerCase().includes(searchQuery.toLowerCase())
+        )
+      : patients;
+
+    if (loading) {
+      return <div className="flex justify-center py-12"><FontAwesomeIcon icon={faSpinner} className="animate-spin text-2xl" /></div>;
+    }
+
+    return (
+      <div className="space-y-6">
+        <div className="flex justify-between items-center">
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-white">My Patients</h2>
+          <div className="w-64">
+            <SearchBar
+              onSearch={setSearchQuery}
+              placeholder="Search patients..."
+              data={patients}
+              searchKeys={['fullName', 'phone', 'cnic', 'email']}
+            />
+          </div>
+        </div>
+
+        {!patients || patients.length === 0 ? (
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center">
+            <FontAwesomeIcon icon={faUsers} className="h-16 w-16 text-gray-400 mb-4" />
+            <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">No Patients Yet</h3>
+            <p className="text-gray-600 dark:text-gray-400">
+              Your patients will appear here after they have completed appointments with you.
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {filteredPatients.map((patient) => (
+              <div key={patient.id} className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden hover:shadow-lg transition">
+                <div className="p-6">
+                  <div className="flex items-center mb-4">
+                    <div className="w-16 h-16 bg-gradient-to-br from-teal-400 to-teal-600 rounded-full flex items-center justify-center text-white font-bold text-xl">
+                      {patient.fullName?.charAt(0) || 'P'}
+                    </div>
+                    <div className="ml-4">
+                      <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{patient.fullName || 'Unknown'}</h3>
+                      <p className="text-sm text-gray-600 dark:text-gray-400">
+                        Age: {patient.age || 'N/A'} • {patient.bloodGroup || 'N/A'}
+                      </p>
+                    </div>
+                  </div>
+                  
+                  <div className="space-y-2 mb-4">
+                    <p className="text-sm text-gray-600 dark:text-gray-400">
+                      <FontAwesomeIcon icon={faPhone} className="mr-2 h-3 w-3" />
+                      {patient.phone || 'N/A'}
+                    </p>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">
+                      <FontAwesomeIcon icon={faHistory} className="mr-2 h-3 w-3" />
+                      Last Visit: {patient.lastVisit ? formatDate(patient.lastVisit) : 'No visits yet'}
+                    </p>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">
+                      <FontAwesomeIcon icon={faFileMedical} className="mr-2 h-3 w-3" />
+                      Total Visits: {patient.visitCount || 0}
+                    </p>
+                  </div>
+
+                  <div className="flex space-x-2">
+                    <button
+                      onClick={() => loadPatientHistory(patient.id)}
+                      className="flex-1 px-3 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition text-sm"
+                    >
+                      View History
+                    </button>
+                    <button
+                      onClick={() => handleChatWithPatient(patient.id, patient.fullName)}
+                      className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition relative"
+                      title="Chat with patient"
+                    >
+                      <FontAwesomeIcon icon={faMessage} />
+                      {unreadMessages[patient.id] > 0 && (
+                        <span className="absolute -top-1 -right-1 bg-red-600 text-white text-xs rounded-full h-4 w-4 flex items-center justify-center">
+                          {unreadMessages[patient.id]}
+                        </span>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderVisits = () => (
     <div className="space-y-6">
       <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Active Visits</h2>
@@ -1797,20 +1329,6 @@ const renderPatients = () => {
                     className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm"
                   >
                     Prescribe
-                  </button>
-                  <button
-                    onClick={() => {
-                      setSelectedVisit(visit);
-                      setLabRequest(prev => ({ 
-                        ...prev, 
-                        patientId: visit.patientId, 
-                        patientName: visit.patientName 
-                      }));
-                      setShowLabRequestForm(true);
-                    }}
-                    className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition text-sm"
-                  >
-                    Lab
                   </button>
                   <button
                     onClick={() => handleCompleteVisit(visit.id)}
@@ -1907,440 +1425,217 @@ const renderPatients = () => {
     </div>
   );
 
-  // Render Lab Requests
-  const renderLabRequests = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Lab Requests</h2>
-        <button
-          onClick={() => setShowLabRequestForm(true)}
-          className="px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition flex items-center"
-        >
-          <FontAwesomeIcon icon={faPlus} className="mr-2" />
-          New Request
-        </button>
-      </div>
-
-      {labRequests.length === 0 ? (
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center">
-          <FontAwesomeIcon icon={faFlask} className="h-16 w-16 text-gray-400 mb-4" />
-          <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">No Lab Requests</h3>
-          <p className="text-gray-600 dark:text-gray-400">
-            Create a lab request to get started.
-          </p>
+  const renderRatings = () => {
+    if (loadingRatings) {
+      return (
+        <div className="flex justify-center py-12">
+          <FontAwesomeIcon icon={faSpinner} className="animate-spin text-2xl" />
         </div>
-      ) : (
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-              <thead className="bg-gray-50 dark:bg-gray-900">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Patient</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Tests</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Requested</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Status</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Priority</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                {labRequests.map((req) => (
-                  <tr key={req.id} className="hover:bg-gray-50 dark:hover:bg-gray-700 transition">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-gray-900 dark:text-white">
-                        {req.patientName}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4">
-                      <div className="text-sm text-gray-900 dark:text-white">
-                        {req.tests?.map(t => t.name).join(', ')}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                      {formatDate(req.requestedAt)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      {getLabStatusBadge(req.status)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`px-2 py-1 rounded-full text-xs ${
-                        req.priority === 'urgent' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
-                        req.priority === 'high' ? 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200' :
-                        'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
-                      }`}>
-                        {req.priority}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm">
-                      {req.status === 'completed' && req.results && (
-                        <button
-                          onClick={() => handleViewLabResults(req.id)}
-                          className="text-teal-600 hover:text-teal-700 mr-3"
-                        >
-                          View Results
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      );
+    }
+
+    return (
+      <div className="space-y-6">
+        <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Patient Reviews & Ratings</h2>
+
+        {/* Rating Summary Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 text-center">
+            <p className="text-sm text-gray-600 dark:text-gray-400">Overall Rating</p>
+            <div className="flex items-center justify-center mt-2">
+              <span className="text-4xl font-bold text-gray-900 dark:text-white">
+                {ratingStats.average.toFixed(1)}
+              </span>
+              <span className="text-xl text-gray-500 ml-1">/5</span>
+            </div>
+            <div className="flex justify-center mt-2">
+              {[1, 2, 3, 4, 5].map(star => (
+                <FontAwesomeIcon
+                  key={star}
+                  icon={faStar}
+                  className={`h-5 w-5 ${star <= Math.round(ratingStats.average) ? 'text-yellow-400' : 'text-gray-300'}`}
+                />
+              ))}
+            </div>
+            <p className="text-sm text-gray-500 mt-2">{ratingStats.total} reviews</p>
+          </div>
+
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 col-span-2">
+            <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Rating Distribution</p>
+            <div className="space-y-2">
+              {[5, 4, 3, 2, 1].map(star => {
+                const count = ratingStats.distribution[star] || 0;
+                const percentage = ratingStats.total > 0 ? (count / ratingStats.total) * 100 : 0;
+                return (
+                  <div key={star} className="flex items-center gap-3">
+                    <div className="w-16 text-sm text-gray-600 dark:text-gray-400">{star} star</div>
+                    <div className="flex-1 h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                      <div className="h-full bg-yellow-400 rounded-full" style={{ width: `${percentage}%` }}></div>
+                    </div>
+                    <div className="w-16 text-sm text-gray-600 dark:text-gray-400">{count}</div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
-      )}
-    </div>
-  );
 
-  // Render Operations
-  const renderOperations = () => (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Operations</h2>
-        <button
-          onClick={() => setShowOperationForm(true)}
-          className="px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition flex items-center"
-        >
-          <FontAwesomeIcon icon={faPlus} className="mr-2" />
-          Schedule Operation
-        </button>
-      </div>
-
-      {operations.length === 0 ? (
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center">
-          <FontAwesomeIcon icon={faStethoscope} className="h-16 w-16 text-gray-400 mb-4" />
-          <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">No Operations</h3>
-          <p className="text-gray-600 dark:text-gray-400">
-            Schedule an operation to get started.
-          </p>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 gap-4">
-          {operations.map((op) => (
-            <div key={op.id} className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 hover:shadow-lg transition">
-              <div className="flex justify-between items-start mb-4">
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                    {op.operationType}
-                  </h3>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">
-                    Patient: {op.patientName} • Scheduled: {formatDate(op.scheduledDate)}
-                  </p>
-                </div>
-                <span className={`px-3 py-1 rounded-full text-sm ${
-                  op.status === 'scheduled' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200' :
-                  op.status === 'in-progress' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200' :
-                  op.status === 'completed' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
-                  'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
-                }`}>
-                  {op.status}
-                </span>
-              </div>
-
-              {/* Checklist for scheduled operations */}
-              {op.status === 'scheduled' && (
-                <div className="mt-4 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
-                  <p className="text-sm font-medium text-gray-900 dark:text-white mb-3">Pre-Operation Checklist</p>
-                  <div className="grid grid-cols-2 gap-4">
-                    {Object.entries(op.checklist || {}).map(([key, value]) => (
-                      <div key={key} className="flex items-center justify-between">
-                        <span className="text-sm text-gray-600 dark:text-gray-400">
-                          {key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase())}
-                        </span>
-                        {value ? (
-                          <span className="text-green-600">
-                            <FontAwesomeIcon icon={faCheckCircle} />
-                          </span>
-                        ) : (
-                          <button
-                            onClick={() => handleConfirmChecklist(op.id, key)}
-                            className="text-sm text-blue-600 hover:text-blue-700"
-                          >
-                            Confirm
-                          </button>
-                        )}
+        {/* Reviews List */}
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
+          <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Patient Reviews</h3>
+          </div>
+          <div className="p-6 space-y-6">
+            {ratingsData.length === 0 ? (
+              <div className="text-center py-8 text-gray-500">No ratings yet</div>
+            ) : (
+              ratingsData.map(rating => (
+                <div key={rating.id} className="border-b border-gray-100 dark:border-gray-700 pb-4 last:border-0">
+                  <div className="flex justify-between items-start mb-2">
+                    <div className="flex items-center">
+                      <div className="w-10 h-10 bg-blue-100 dark:bg-blue-900 rounded-full flex items-center justify-center mr-3">
+                        <FontAwesomeIcon icon={faUserInjured} className="h-5 w-5 text-blue-600" />
                       </div>
-                    ))}
+                      <div>
+                        <p className="font-medium text-gray-900 dark:text-white">
+                          {rating.patientName || 'Anonymous'}
+                        </p>
+                        <p className="text-xs text-gray-500">{formatDate(rating.createdAt)}</p>
+                      </div>
+                    </div>
+                    <div className="flex">
+                      {[1, 2, 3, 4, 5].map(star => (
+                        <FontAwesomeIcon
+                          key={star}
+                          icon={faStar}
+                          className={`h-4 w-4 ${star <= rating.rating ? 'text-yellow-400' : 'text-gray-300'}`}
+                        />
+                      ))}
+                    </div>
                   </div>
-                  
-                  {Object.values(op.checklist || {}).every(v => v) && op.status === 'scheduled' && (
-                    <button
-                      onClick={() => handleStartOperation(op.id)}
-                      className="mt-4 w-full px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition"
-                    >
-                      Start Operation
-                    </button>
+                  {rating.review && (
+                    <p className="text-gray-700 dark:text-gray-300 ml-13 pl-13">{rating.review}</p>
                   )}
                 </div>
-              )}
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
 
-              {/* Required equipment */}
-              {op.requiredEquipment && op.requiredEquipment.length > 0 && (
-                <div className="mt-4">
-                  <p className="text-sm font-medium text-gray-900 dark:text-white mb-2">Required Equipment</p>
-                  <div className="flex flex-wrap gap-2">
-                    {op.requiredEquipment.map((eq, index) => (
-                      <span key={index} className="px-3 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-full text-sm">
-                        {eq.name} ({eq.quantity})
+  const renderChats = () => {
+    const chatEligibleStatuses = ['confirmed', 'checked-in', 'in-progress', 'completed'];
+    
+    const patientsFromAppointments = appointments.all
+      .filter(apt => apt && apt.patientId && chatEligibleStatuses.includes(apt.status))
+      .map(apt => ({
+        id: apt.patientId,
+        fullName: apt.patientName || apt.patient?.fullName || 'Unknown Patient',
+        lastAppointment: apt.date,
+        status: apt.status
+      }));
+    
+    const patientsFromVisits = visits
+      .filter(v => v && v.patientId && (v.status === 'active' || v.status === 'completed'))
+      .map(v => ({
+        id: v.patientId,
+        fullName: v.patientName || 'Unknown Patient',
+        lastVisit: v.createdAt
+      }));
+    
+    const chatPatientsMap = new Map();
+    
+    patientsFromAppointments.forEach(p => {
+      if (!chatPatientsMap.has(p.id)) {
+        chatPatientsMap.set(p.id, p);
+      }
+    });
+    
+    patientsFromVisits.forEach(p => {
+      if (!chatPatientsMap.has(p.id)) {
+        chatPatientsMap.set(p.id, p);
+      }
+    });
+    
+    const allChatPatients = Array.from(chatPatientsMap.values());
+    
+    if (allChatPatients.length === 0) {
+      return (
+        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center">
+          <FontAwesomeIcon icon={faMessage} className="h-16 w-16 text-gray-400 mb-4" />
+          <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">No Active Chats</h3>
+          <p className="text-gray-600 dark:text-gray-400">
+            Your chats with patients will appear here once appointments are confirmed.
+          </p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-6">
+        <div className="flex justify-between items-center">
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Active Chats</h2>
+          <span className="text-sm text-gray-500">{allChatPatients.length} active conversation{allChatPatients.length !== 1 ? 's' : ''}</span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {allChatPatients.map((patient) => (
+            <div key={patient.id} className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden hover:shadow-lg transition">
+              <div className="p-6">
+                <div className="flex items-center mb-4">
+                  <div className="w-16 h-16 bg-gradient-to-br from-green-400 to-green-600 rounded-full flex items-center justify-center text-white font-bold text-xl relative">
+                    {patient.fullName?.charAt(0) || 'P'}
+                    {unreadMessages && unreadMessages[patient.id] > 0 && (
+                      <span className="absolute -top-1 -right-1 bg-red-600 text-white text-xs rounded-full h-6 w-6 flex items-center justify-center animate-pulse">
+                        {unreadMessages[patient.id]}
                       </span>
-                    ))}
+                    )}
+                  </div>
+                  <div className="ml-4">
+                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{patient.fullName}</h3>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">
+                      {patient.lastAppointment ? `Last appointment: ${patient.lastAppointment}` : 'Active patient'}
+                    </p>
                   </div>
                 </div>
-              )}
-
-              {/* Required staff */}
-              {op.requiredStaff && op.requiredStaff.length > 0 && (
-                <div className="mt-4">
-                  <p className="text-sm font-medium text-gray-900 dark:text-white mb-2">Required Staff</p>
-                  <div className="flex flex-wrap gap-2">
-                    {op.requiredStaff.map((staff, index) => (
-                      <span key={index} className="px-3 py-1 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-full text-sm">
-                        {staff.role} ({staff.count})
+                
+                <div className="flex space-x-2">
+                  <button
+                    onClick={() => handleChatWithPatient(patient.id, patient.fullName)}
+                    className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm font-medium flex items-center justify-center"
+                  >
+                    <FontAwesomeIcon icon={faMessage} className="mr-2" />
+                    Open Chat
+                    {unreadMessages && unreadMessages[patient.id] > 0 && (
+                      <span className="ml-2 bg-white text-green-600 px-2 py-0.5 rounded-full text-xs">
+                        {unreadMessages[patient.id]} new
                       </span>
-                    ))}
-                  </div>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => {
+                      const patientAppointment = appointments.all?.find(apt => apt.patientId === patient.id);
+                      if (patientAppointment) {
+                        handleViewAppointmentDetails(patientAppointment);
+                      } else {
+                        toast.info('No recent appointment found');
+                      }
+                    }}
+                    className="px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition"
+                    title="View Appointment"
+                  >
+                    <FontAwesomeIcon icon={faEye} />
+                  </button>
                 </div>
-              )}
+              </div>
             </div>
           ))}
         </div>
-      )}
-    </div>
-  );
-
-const renderRatings = () => {
-  if (loadingRatings) {
-    return (
-      <div className="flex justify-center py-12">
-        <FontAwesomeIcon icon={faSpinner} className="animate-spin text-2xl" />
       </div>
     );
-  }
-
-  return (
-    <div className="space-y-6">
-      <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Patient Reviews & Ratings</h2>
-
-      {/* Rating Summary Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 text-center">
-          <p className="text-sm text-gray-600 dark:text-gray-400">Overall Rating</p>
-          <div className="flex items-center justify-center mt-2">
-            <span className="text-4xl font-bold text-gray-900 dark:text-white">
-              {ratingStats.average.toFixed(1)}
-            </span>
-            <span className="text-xl text-gray-500 ml-1">/5</span>
-          </div>
-          <div className="flex justify-center mt-2">
-            {[1, 2, 3, 4, 5].map(star => (
-              <FontAwesomeIcon
-                key={star}
-                icon={faStar}
-                className={`h-5 w-5 ${star <= Math.round(ratingStats.average) ? 'text-yellow-400' : 'text-gray-300'}`}
-              />
-            ))}
-          </div>
-          <p className="text-sm text-gray-500 mt-2">{ratingStats.total} reviews</p>
-        </div>
-
-        <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-6 col-span-2">
-          <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">Rating Distribution</p>
-          <div className="space-y-2">
-            {[5, 4, 3, 2, 1].map(star => {
-              const count = ratingStats.distribution[star] || 0;
-              const percentage = ratingStats.total > 0 ? (count / ratingStats.total) * 100 : 0;
-              return (
-                <div key={star} className="flex items-center gap-3">
-                  <div className="w-16 text-sm text-gray-600 dark:text-gray-400">{star} star</div>
-                  <div className="flex-1 h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                    <div className="h-full bg-yellow-400 rounded-full" style={{ width: `${percentage}%` }}></div>
-                  </div>
-                  <div className="w-16 text-sm text-gray-600 dark:text-gray-400">{count}</div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-
-      {/* Reviews List */}
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
-        <div className="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Patient Reviews</h3>
-        </div>
-        <div className="p-6 space-y-6">
-          {ratingsData.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">No ratings yet</div>
-          ) : (
-            ratingsData.map(rating => (
-              <div key={rating.id} className="border-b border-gray-100 dark:border-gray-700 pb-4 last:border-0">
-                <div className="flex justify-between items-start mb-2">
-                  <div className="flex items-center">
-                    <div className="w-10 h-10 bg-blue-100 dark:bg-blue-900 rounded-full flex items-center justify-center mr-3">
-                      <FontAwesomeIcon icon={faUserInjured} className="h-5 w-5 text-blue-600" />
-                    </div>
-                    <div>
-                      <p className="font-medium text-gray-900 dark:text-white">
-                        {rating.patientName || 'Anonymous'}
-                      </p>
-                      <p className="text-xs text-gray-500">{formatDate(rating.createdAt)}</p>
-                    </div>
-                  </div>
-                  <div className="flex">
-                    {[1, 2, 3, 4, 5].map(star => (
-                      <FontAwesomeIcon
-                        key={star}
-                        icon={faStar}
-                        className={`h-4 w-4 ${star <= rating.rating ? 'text-yellow-400' : 'text-gray-300'}`}
-                      />
-                    ))}
-                  </div>
-                </div>
-                {rating.review && (
-                  <p className="text-gray-700 dark:text-gray-300 ml-13 pl-13">{rating.review}</p>
-                )}
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// In Doctor.jsx, replace the renderChats function with:
-
-const renderChats = () => {
-  // Directly extract unique patients from appointments that have chat-eligible statuses
-  const chatEligibleStatuses = ['confirmed', 'checked-in', 'in-progress', 'completed'];
-  
-  // Extract patients from appointments
-  const patientsFromAppointments = appointments.all
-    .filter(apt => apt && apt.patientId && chatEligibleStatuses.includes(apt.status))
-    .map(apt => ({
-      id: apt.patientId,
-      fullName: apt.patientName || apt.patient?.fullName || 'Unknown Patient',
-      lastAppointment: apt.date,
-      status: apt.status
-    }));
-  
-  // Extract patients from visits (active visits)
-  const patientsFromVisits = visits
-    .filter(v => v && v.patientId && (v.status === 'active' || v.status === 'completed'))
-    .map(v => ({
-      id: v.patientId,
-      fullName: v.patientName || 'Unknown Patient',
-      lastVisit: v.createdAt
-    }));
-  
-  // Merge and deduplicate by ID, preferring names from appointments
-  const chatPatientsMap = new Map();
-  
-  // Add from appointments first (preferred source)
-  patientsFromAppointments.forEach(p => {
-    if (!chatPatientsMap.has(p.id)) {
-      chatPatientsMap.set(p.id, p);
-    }
-  });
-  
-  // Add from visits if not already present
-  patientsFromVisits.forEach(p => {
-    if (!chatPatientsMap.has(p.id)) {
-      chatPatientsMap.set(p.id, p);
-    }
-  });
-  
-  const allChatPatients = Array.from(chatPatientsMap.values());
-  
-  console.log('=== CHAT PATIENTS DEBUG ===');
-  console.log('Total appointments:', appointments.all?.length);
-  console.log('Appointments with eligible statuses:', patientsFromAppointments.length);
-  console.log('Patients from visits:', patientsFromVisits.length);
-  console.log('Unique chat patients found:', allChatPatients.length);
-  console.log('Chat patients list:', allChatPatients.map(p => ({ id: p.id, name: p.fullName })));
-  console.log('Appointment statuses:', appointments.all?.map(a => ({ id: a.id, status: a.status, patientName: a.patientName })));
-  console.log('Unread messages:', unreadMessages);
-  
-  if (allChatPatients.length === 0) {
-    return (
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-12 text-center">
-        <FontAwesomeIcon icon={faMessage} className="h-16 w-16 text-gray-400 mb-4" />
-        <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">No Active Chats</h3>
-        <p className="text-gray-600 dark:text-gray-400">
-          Your chats with patients will appear here once appointments are confirmed and paid.
-        </p>
-        <div className="mt-4 p-3 bg-gray-100 dark:bg-gray-700 rounded-lg text-left text-sm">
-          <p className="font-medium mb-1">Debug Info:</p>
-          <p>Total Appointments: {appointments.all?.length || 0}</p>
-          <p>Appointment Statuses: {[...new Set(appointments.all?.map(a => a.status))].join(', ') || 'None'}</p>
-          <p>Active Visits: {visits.filter(v => v.status === 'active').length}</p>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Active Chats</h2>
-        <span className="text-sm text-gray-500">{allChatPatients.length} active conversation{allChatPatients.length !== 1 ? 's' : ''}</span>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {allChatPatients.map((patient) => (
-          <div key={patient.id} className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden hover:shadow-lg transition">
-            <div className="p-6">
-              <div className="flex items-center mb-4">
-                <div className="w-16 h-16 bg-gradient-to-br from-green-400 to-green-600 rounded-full flex items-center justify-center text-white font-bold text-xl relative">
-                  {patient.fullName?.charAt(0) || patient.fullName?.charAt(0) || 'P'}
-                  {unreadMessages && unreadMessages[patient.id] > 0 && (
-                    <span className="absolute -top-1 -right-1 bg-red-600 text-white text-xs rounded-full h-6 w-6 flex items-center justify-center animate-pulse">
-                      {unreadMessages[patient.id]}
-                    </span>
-                  )}
-                </div>
-                <div className="ml-4">
-                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white">{patient.fullName}</h3>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">
-                    {patient.lastAppointment ? `Last appointment: ${patient.lastAppointment}` : 'Active patient'}
-                  </p>
-                </div>
-              </div>
-              
-              <div className="flex space-x-2">
-                <button
-                  onClick={() => handleChatWithPatient(patient.id, patient.fullName)}
-                  className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm font-medium flex items-center justify-center"
-                >
-                  <FontAwesomeIcon icon={faMessage} className="mr-2" />
-                  Open Chat
-                  {unreadMessages && unreadMessages[patient.id] > 0 && (
-                    <span className="ml-2 bg-white text-green-600 px-2 py-0.5 rounded-full text-xs">
-                      {unreadMessages[patient.id]} new
-                    </span>
-                  )}
-                </button>
-                <button
-                  onClick={() => {
-                    const patientAppointment = appointments.all?.find(apt => apt.patientId === patient.id);
-                    if (patientAppointment) {
-                      handleViewAppointmentDetails(patientAppointment);
-                    } else {
-                      toast.info('No recent appointment found');
-                    }
-                  }}
-                  className="px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition"
-                  title="View Appointment"
-                >
-                  <FontAwesomeIcon icon={faEye} />
-                </button>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-};
+  };
 
   // Render Profile Settings Modal
   const renderProfileSettingsModal = () => {
@@ -2361,64 +1656,62 @@ const renderChats = () => {
 
           <form onSubmit={(e) => { e.preventDefault(); handleProfileUpdate(); }} className="space-y-6">
             {/* Profile Image Section */}
-<div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg">
-  <h4 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center">
-    <FontAwesomeIcon icon={faUserCircle} className="mr-2 text-teal-500" />
-    Profile Picture
-  </h4>
-  
-  <div className="flex flex-col items-center">
-    <div className="relative">
-      {/* Image Preview */}
-      <div className="w-32 h-32 rounded-full overflow-hidden bg-gray-100 dark:bg-gray-600 border-4 border-teal-500">
-        {profileForm.profileImage ? (
-          <img 
-            src={profileForm.profileImage} 
-            alt="Profile" 
-            className="w-full h-full object-cover"
-          />
-        ) : (
-          <div className="w-full h-full flex items-center justify-center">
-            <FontAwesomeIcon icon={faUserMd} className="h-16 w-16 text-gray-400" />
-          </div>
-        )}
-      </div>
-      
-      {/* Upload Button */}
-      <label 
-        htmlFor="doctor-profile-image-input"
-        className="absolute bottom-0 right-0 w-10 h-10 bg-teal-600 text-white rounded-full flex items-center justify-center cursor-pointer hover:bg-teal-700 transition shadow-lg"
-      >
-        <FontAwesomeIcon icon={faCamera} className="h-5 w-5" />
-        <input
-          id="doctor-profile-image-input"
-          type="file"
-          accept="image/jpeg,image/jpg,image/png,image/gif,image/webp"
-          onChange={handleProfileImageUpload}
-          className="hidden"
-        />
-      </label>
+            <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg">
+              <h4 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center">
+                <FontAwesomeIcon icon={faUserCircle} className="mr-2 text-teal-500" />
+                Profile Picture
+              </h4>
+              
+              <div className="flex flex-col items-center">
+                <div className="relative">
+                  <div className="w-32 h-32 rounded-full overflow-hidden bg-gray-100 dark:bg-gray-600 border-4 border-teal-500">
+                    {profileForm.profileImage ? (
+                      <img 
+                        src={profileForm.profileImage} 
+                        alt="Profile" 
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <FontAwesomeIcon icon={faUserMd} className="h-16 w-16 text-gray-400" />
+                      </div>
+                    )}
+                  </div>
+                  
+                  <label 
+                    htmlFor="doctor-profile-image-input"
+                    className="absolute bottom-0 right-0 w-10 h-10 bg-teal-600 text-white rounded-full flex items-center justify-center cursor-pointer hover:bg-teal-700 transition shadow-lg"
+                  >
+                    <FontAwesomeIcon icon={faCamera} className="h-5 w-5" />
+                    <input
+                      id="doctor-profile-image-input"
+                      type="file"
+                      accept="image/jpeg,image/jpg,image/png,image/gif,image/webp"
+                      onChange={handleProfileImageUpload}
+                      className="hidden"
+                    />
+                  </label>
 
-      {/* Remove Image Button */}
-      {profileForm.profileImage && (
-        <button
-          type="button"
-          onClick={() => handleRemoveProfileImage()}
-          className="absolute top-0 right-0 w-8 h-8 bg-red-600 text-white rounded-full flex items-center justify-center hover:bg-red-700 transition shadow-lg"
-        >
-          <FontAwesomeIcon icon={faTimes} className="h-4 w-4" />
-        </button>
-      )}
-    </div>
+                  {profileForm.profileImage && (
+                    <button
+                      type="button"
+                      onClick={handleRemoveProfileImage}
+                      className="absolute top-0 right-0 w-8 h-8 bg-red-600 text-white rounded-full flex items-center justify-center hover:bg-red-700 transition shadow-lg"
+                    >
+                      <FontAwesomeIcon icon={faTimes} className="h-4 w-4" />
+                    </button>
+                  )}
+                </div>
 
-    <p className="text-sm text-gray-500 dark:text-gray-400 mt-3">
-      Upload profile picture (Optional)
-    </p>
-    <p className="text-xs text-gray-400 dark:text-gray-500">
-      Max size: 2MB. Allowed: JPG, PNG, GIF, WEBP
-    </p>
-  </div>
-</div>
+                <p className="text-sm text-gray-500 dark:text-gray-400 mt-3">
+                  Upload profile picture (Optional)
+                </p>
+                <p className="text-xs text-gray-400 dark:text-gray-500">
+                  Max size: 2MB. Allowed: JPG, PNG, GIF, WEBP
+                </p>
+              </div>
+            </div>
+            
             {/* Personal Information */}
             <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg">
               <h4 className="text-lg font-semibold text-gray-900 dark:text-white mb-4 flex items-center">
@@ -2447,9 +1740,7 @@ const renderChats = () => {
                   <input
                     type="email"
                     value={profileForm.email}
-                    onChange={(e) => setProfileForm({ ...profileForm, email: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-teal-500 dark:bg-gray-700 dark:text-white"
-                    required
                     readOnly
                     disabled
                   />
@@ -2882,424 +2173,6 @@ const renderChats = () => {
     );
   };
 
-  // Render Lab Request Form Modal
-  const renderLabRequestForm = () => {
-    if (!showLabRequestForm) return null;
-
-    return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-        <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-4xl w-full max-h-[90vh] overflow-y-auto">
-          <div className="flex justify-between items-center mb-6">
-            <h3 className="text-xl font-semibold text-gray-900 dark:text-white">New Lab Request</h3>
-            <button
-              onClick={() => {
-                setShowLabRequestForm(false);
-                setLabRequest({
-                  patientId: '',
-                  patientName: '',
-                  tests: [{ name: '', instructions: '' }],
-                  priority: 'normal',
-                  notes: ''
-                });
-              }}
-              className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-            >
-              <FontAwesomeIcon icon={faTimes} size="lg" />
-            </button>
-          </div>
-          
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Patient *
-              </label>
-              <select
-                value={labRequest.patientId}
-                onChange={(e) => {
-                  const patient = patients.find(p => p.id === e.target.value);
-                  setLabRequest(prev => ({
-                    ...prev,
-                    patientId: e.target.value,
-                    patientName: patient?.fullName || ''
-                  }));
-                }}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                required
-              >
-                <option value="">Select Patient</option>
-                {patients.map(patient => (
-                  <option key={patient.id} value={patient.id}>{patient.fullName}</option>
-                ))}
-              </select>
-            </div>
-
-            {labRequest.tests.map((test, index) => (
-              <div key={index} className="p-4 border border-gray-200 dark:border-gray-700 rounded-lg">
-                <div className="flex justify-between items-center mb-3">
-                  <h4 className="font-medium text-gray-900 dark:text-white">Test #{index + 1}</h4>
-                  {labRequest.tests.length > 1 && (
-                    <button
-                      onClick={() => handleRemoveTest(index)}
-                      className="text-red-600 hover:text-red-700"
-                    >
-                      <FontAwesomeIcon icon={faTimes} />
-                    </button>
-                  )}
-                </div>
-                
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Test Name *
-                    </label>
-                    <input
-                      type="text"
-                      value={test.name}
-                      onChange={(e) => handleTestChange(index, 'name', e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                      placeholder="e.g., Complete Blood Count"
-                      required
-                    />
-                  </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Special Instructions
-                    </label>
-                    <input
-                      type="text"
-                      value={test.instructions}
-                      onChange={(e) => handleTestChange(index, 'instructions', e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                      placeholder="e.g., Fasting required"
-                    />
-                  </div>
-                </div>
-              </div>
-            ))}
-
-            <button
-              onClick={handleAddTest}
-              className="w-full py-2 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg text-gray-600 dark:text-gray-400 hover:border-blue-500 hover:text-blue-500 transition"
-            >
-              <FontAwesomeIcon icon={faPlus} className="mr-2" />
-              Add Another Test
-            </button>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Priority
-              </label>
-              <select
-                value={labRequest.priority}
-                onChange={(e) => setLabRequest(prev => ({ ...prev, priority: e.target.value }))}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-              >
-                <option value="normal">Normal</option>
-                <option value="high">High</option>
-                <option value="urgent">Urgent</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Additional Notes
-              </label>
-              <textarea
-                value={labRequest.notes}
-                onChange={(e) => setLabRequest(prev => ({ ...prev, notes: e.target.value }))}
-                rows="3"
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                placeholder="Any specific instructions for the lab..."
-              />
-            </div>
-          </div>
-
-          <div className="flex justify-end space-x-3 mt-6">
-            <button
-              onClick={() => {
-                setShowLabRequestForm(false);
-                setLabRequest({
-                  patientId: '',
-                  patientName: '',
-                  tests: [{ name: '', instructions: '' }],
-                  priority: 'normal',
-                  notes: ''
-                });
-              }}
-              className="px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleCreateLabRequest}
-              disabled={loading}
-              className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition disabled:opacity-50"
-            >
-              {loading ? 'Creating...' : 'Create Request'}
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  // Render Operation Form Modal
-  const renderOperationForm = () => {
-    if (!showOperationForm) return null;
-
-    return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-        <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-4xl w-full max-h-[90vh] overflow-y-auto">
-          <div className="flex justify-between items-center mb-6">
-            <h3 className="text-xl font-semibold text-gray-900 dark:text-white">Schedule Operation</h3>
-            <button
-              onClick={() => {
-                setShowOperationForm(false);
-                setOperation({
-                  patientId: '',
-                  patientName: '',
-                  operationType: '',
-                  requiredEquipment: [],
-                  requiredStaff: [],
-                  scheduledDate: '',
-                  estimatedDuration: '',
-                  notes: '',
-                  checklist: {
-                    consentConfirmed: false,
-                    equipmentConfirmed: false,
-                    staffConfirmed: false,
-                    riskAcknowledged: false
-                  }
-                });
-              }}
-              className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-            >
-              <FontAwesomeIcon icon={faTimes} size="lg" />
-            </button>
-          </div>
-
-          <form onSubmit={(e) => { e.preventDefault(); handleScheduleOperation(); }} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Patient *
-              </label>
-              <select
-                value={operation.patientId}
-                onChange={(e) => {
-                  const patient = patients.find(p => p.id === e.target.value);
-                  setOperation(prev => ({
-                    ...prev,
-                    patientId: e.target.value,
-                    patientName: patient?.fullName || ''
-                  }));
-                }}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                required
-              >
-                <option value="">Select Patient</option>
-                {patients.map(patient => (
-                  <option key={patient.id} value={patient.id}>{patient.fullName}</option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Operation Type *
-              </label>
-              <input
-                type="text"
-                value={operation.operationType}
-                onChange={(e) => setOperation(prev => ({ ...prev, operationType: e.target.value }))}
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                placeholder="e.g., Appendectomy, Cataract Surgery"
-                required
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Scheduled Date *
-                </label>
-                <input
-                  type="datetime-local"
-                  value={operation.scheduledDate}
-                  onChange={(e) => setOperation(prev => ({ ...prev, scheduledDate: e.target.value }))}
-                  min={new Date().toISOString().slice(0, 16)}
-                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Estimated Duration (hours) *
-                </label>
-                <input
-                  type="number"
-                  step="0.5"
-                  min="0.5"
-                  value={operation.estimatedDuration}
-                  onChange={(e) => setOperation(prev => ({ ...prev, estimatedDuration: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                  required
-                />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Required Equipment
-              </label>
-              <div className="space-y-2">
-                {operation.requiredEquipment.map((eq, index) => (
-                  <div key={index} className="flex space-x-2">
-                    <input
-                      type="text"
-                      value={eq.name}
-                      onChange={(e) => {
-                        const newEq = [...operation.requiredEquipment];
-                        newEq[index] = { ...newEq[index], name: e.target.value };
-                        setOperation(prev => ({ ...prev, requiredEquipment: newEq }));
-                      }}
-                      className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                      placeholder="Equipment name"
-                    />
-                    <input
-                      type="number"
-                      value={eq.quantity}
-                      onChange={(e) => {
-                        const newEq = [...operation.requiredEquipment];
-                        newEq[index] = { ...newEq[index], quantity: parseInt(e.target.value) };
-                        setOperation(prev => ({ ...prev, requiredEquipment: newEq }));
-                      }}
-                      className="w-20 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                      placeholder="Qty"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOperation(prev => ({
-                          ...prev,
-                          requiredEquipment: prev.requiredEquipment.filter((_, i) => i !== index)
-                        }));
-                      }}
-                      className="text-red-600 hover:text-red-700"
-                    >
-                      <FontAwesomeIcon icon={faTimes} />
-                    </button>
-                  </div>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setOperation(prev => ({
-                      ...prev,
-                      requiredEquipment: [...prev.requiredEquipment, { name: '', quantity: 1 }]
-                    }));
-                  }}
-                  className="text-sm text-blue-600 hover:text-blue-700"
-                >
-                  + Add Equipment
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Required Staff
-              </label>
-              <div className="space-y-2">
-                {operation.requiredStaff.map((staff, index) => (
-                  <div key={index} className="flex space-x-2">
-                    <input
-                      type="text"
-                      value={staff.role}
-                      onChange={(e) => {
-                        const newStaff = [...operation.requiredStaff];
-                        newStaff[index] = { ...newStaff[index], role: e.target.value };
-                        setOperation(prev => ({ ...prev, requiredStaff: newStaff }));
-                      }}
-                      className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                      placeholder="Role (e.g., Surgeon, Nurse)"
-                    />
-                    <input
-                      type="number"
-                      value={staff.count}
-                      onChange={(e) => {
-                        const newStaff = [...operation.requiredStaff];
-                        newStaff[index] = { ...newStaff[index], count: parseInt(e.target.value) };
-                        setOperation(prev => ({ ...prev, requiredStaff: newStaff }));
-                      }}
-                      className="w-20 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                      placeholder="Count"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOperation(prev => ({
-                          ...prev,
-                          requiredStaff: prev.requiredStaff.filter((_, i) => i !== index)
-                        }));
-                      }}
-                      className="text-red-600 hover:text-red-700"
-                    >
-                      <FontAwesomeIcon icon={faTimes} />
-                    </button>
-                  </div>
-                ))}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setOperation(prev => ({
-                      ...prev,
-                      requiredStaff: [...prev.requiredStaff, { role: '', count: 1 }]
-                    }));
-                  }}
-                  className="text-sm text-blue-600 hover:text-blue-700"
-                >
-                  + Add Staff
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                Notes
-              </label>
-              <textarea
-                value={operation.notes}
-                onChange={(e) => setOperation(prev => ({ ...prev, notes: e.target.value }))}
-                rows="3"
-                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
-                placeholder="Any special instructions or notes..."
-              />
-            </div>
-
-            <div className="flex justify-end space-x-3 mt-6">
-              <button
-                type="button"
-                onClick={() => setShowOperationForm(false)}
-                className="px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={loading}
-                className="px-4 py-2 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition disabled:opacity-50"
-              >
-                {loading ? 'Scheduling...' : 'Schedule Operation'}
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
-    );
-  };
-
   // Render Patient History Modal
   const renderPatientHistoryModal = () => {
     if (!showPatientHistory || !patientHistory) return null;
@@ -3412,95 +2285,6 @@ const renderChats = () => {
                       <p className="text-lg font-bold text-gray-900 dark:text-white">{count}</p>
                       <p className="text-xs text-gray-600 dark:text-gray-400">{year}</p>
                     </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  // Render Lab Results Modal
-  const renderLabResultsModal = () => {
-    if (!showLabResults || !selectedLabResult) return null;
-
-    return (
-      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-        <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-3xl w-full max-h-[90vh] overflow-y-auto">
-          <div className="flex justify-between items-center mb-6">
-            <h3 className="text-xl font-semibold text-gray-900 dark:text-white">
-              Lab Results - {selectedLabResult.patientName}
-            </h3>
-            <button
-              onClick={() => {
-                setShowLabResults(false);
-                setSelectedLabResult(null);
-              }}
-              className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-            >
-              <FontAwesomeIcon icon={faTimes} size="lg" />
-            </button>
-          </div>
-
-          <div className="space-y-6">
-            {/* Test Information */}
-            <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">Patient</p>
-                  <p className="font-medium text-gray-900 dark:text-white">{selectedLabResult.patientName}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">Requested Date</p>
-                  <p className="font-medium text-gray-900 dark:text-white">{formatDate(selectedLabResult.requestedAt)}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">Completed Date</p>
-                  <p className="font-medium text-gray-900 dark:text-white">{formatDate(selectedLabResult.completedAt)}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">Requested By</p>
-                  <p className="font-medium text-gray-900 dark:text-white">Dr. {selectedLabResult.doctorName}</p>
-                </div>
-              </div>
-            </div>
-
-            {/* Test Results */}
-            {selectedLabResult.results && (
-              <div>
-                <h4 className="text-md font-semibold text-gray-900 dark:text-white mb-3">Results</h4>
-                <div className="bg-gray-50 dark:bg-gray-700 rounded-lg p-4">
-                  <pre className="whitespace-pre-wrap text-gray-800 dark:text-gray-200 font-mono text-sm">
-                    {selectedLabResult.results.results}
-                  </pre>
-                </div>
-              </div>
-            )}
-
-            {/* Notes */}
-            {selectedLabResult.results?.notes && (
-              <div>
-                <h4 className="text-md font-semibold text-gray-900 dark:text-white mb-3">Notes</h4>
-                <p className="text-gray-700 dark:text-gray-300">{selectedLabResult.results.notes}</p>
-              </div>
-            )}
-
-            {/* Attachments */}
-            {selectedLabResult.results?.files && Object.keys(selectedLabResult.results.files).length > 0 && (
-              <div>
-                <h4 className="text-md font-semibold text-gray-900 dark:text-white mb-3">Attachments</h4>
-                <div className="space-y-2">
-                  {Object.entries(selectedLabResult.results.files).map(([filename, data]) => (
-                    <button
-                      key={filename}
-                      onClick={() => handleDownloadLabReport(data, filename)}
-                      className="flex items-center w-full p-3 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition"
-                    >
-                      <FontAwesomeIcon icon={faDownload} className="text-blue-600 mr-3" />
-                      <span className="text-gray-700 dark:text-gray-300">{filename}</span>
-                    </button>
                   ))}
                 </div>
               </div>
@@ -3694,20 +2478,6 @@ const renderChats = () => {
               >
                 <FontAwesomeIcon icon={faPrescription} />
               </button>
-              <button
-                onClick={() => setShowLabRequestForm(true)}
-                className="w-full flex justify-center p-3 text-yellow-600 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"
-                title="Request Lab Test"
-              >
-                <FontAwesomeIcon icon={faFlask} />
-              </button>
-              <button
-                onClick={() => setShowOperationForm(true)}
-                className="w-full flex justify-center p-3 text-red-600 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"
-                title="Schedule Operation"
-              >
-                <FontAwesomeIcon icon={faStethoscope} />
-              </button>
             </div>
           )}
 
@@ -3739,8 +2509,6 @@ const renderChats = () => {
             {activeTab === 'appointments' && renderAppointments()}
             {activeTab === 'patients' && renderPatients()}
             {activeTab === 'visits' && renderVisits()}
-            {activeTab === 'lab-requests' && renderLabRequests()}
-            {activeTab === 'operations' && renderOperations()}
             {activeTab === 'ratings' && renderRatings()}
             {activeTab === 'chats' && renderChats()}
           </>
@@ -3773,10 +2541,7 @@ const renderChats = () => {
       )}
 
       {renderPrescriptionForm()}
-      {renderLabRequestForm()}
-      {renderOperationForm()}
       {renderPatientHistoryModal()}
-      {renderLabResultsModal()}
       {renderProfileSettingsModal()}  
 
       {showChat && chatWith && (
@@ -3792,6 +2557,21 @@ const renderChats = () => {
           }}
         />
       )}
+      {showConsultationNotesModal && selectedAppointmentForConsultation && (
+  <ConsultationNotesModal
+    appointment={selectedAppointmentForConsultation}
+    patient={selectedAppointmentForConsultation.patient || { 
+      id: selectedAppointmentForConsultation.patientId,
+      fullName: selectedAppointmentForConsultation.patientName 
+    }}
+    doctorId={currentUser.uid}
+    onClose={() => {
+      setShowConsultationNotesModal(false);
+      setSelectedAppointmentForConsultation(null);
+    }}
+    onSuccess={handleConsultationSuccess}
+  />
+)}
     </div>
   );
 };

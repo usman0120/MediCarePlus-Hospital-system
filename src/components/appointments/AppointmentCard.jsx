@@ -9,6 +9,7 @@ import {
   faTimesCircle,
   faComment,
   faHourglassHalf,
+  faStethoscope,
   faPhone,
   faEnvelope,
   faNotesMedical,
@@ -29,6 +30,8 @@ const AppointmentCard = ({
   onCheckIn,
   onCancel,
   onViewDetails,
+  onStartConsultation,  
+  onViewConsultationNotes,
   onChatWithDoctor,
   onPaySuccess,
   onRateDoctor,
@@ -281,12 +284,12 @@ const handleRatingSuccess = (ratingData) => {
 {/* Doctor Actions */}
 {role === 'doctor' && (
   <>
-    {/* Show Start Consultation for confirmed or checked-in appointments */}
     {(appointment.status === 'confirmed' || appointment.status === 'checked-in') && (
       <button
-        onClick={() => onViewDetails(appointment)}
-        className="px-3 py-1 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition text-sm"
+        onClick={() => onStartConsultation && onStartConsultation(appointment)}
+        className="px-3 py-1 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition text-sm flex items-center"
       >
+        <FontAwesomeIcon icon={faStethoscope} className="mr-1" />
         Start Consultation
       </button>
     )}
@@ -337,6 +340,16 @@ const handleRatingSuccess = (ratingData) => {
                 Cancel Appointment
               </button>
             )}
+
+            {role === 'patient' && onViewConsultationNotes && (
+  <button
+    onClick={() => onViewConsultationNotes(appointment)}
+    className="px-3 py-1 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition text-sm flex items-center"
+  >
+    <FontAwesomeIcon icon={faNotesMedical} className="mr-1" />
+    View Notes
+  </button>
+)}
 
 
             {/* Patient Actions - Pay Fee */}

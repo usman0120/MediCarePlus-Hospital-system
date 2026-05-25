@@ -9,7 +9,8 @@ import {
   faUniversity,
   faCreditCard,
   faReceipt,
-  faSpinner
+  faSpinner,
+  faShieldAlt,
 } from '@fortawesome/free-solid-svg-icons';
 import { verifyAndAssignAppointment, rejectAppointmentPayment, getUserById } from '../database';
 import { formatCurrency, formatDate } from '../utils/helpers';
@@ -29,6 +30,12 @@ const PaymentVerificationModal = ({ appointment, onClose, onVerified, onRejected
     return appointment.id || appointment.appointmentId || appointment._id;
   };
 
+  // Check if payment is cash
+  const isCashPayment = () => {
+    const paymentMethod = enrichedAppointment.paymentMethod;
+    return paymentMethod === 'cash' || paymentMethod === 'Cash' || paymentMethod === 'CASH';
+  };
+  
   // Fetch missing patient and doctor details
   useEffect(() => {
     const enrichAppointmentDetails = async () => {
@@ -83,7 +90,12 @@ const PaymentVerificationModal = ({ appointment, onClose, onVerified, onRejected
       return;
     }
 
-    if (!window.confirm('Verify this payment and confirm the appointment?\n\nThis action cannot be undone.')) {
+    // For cash payments, show a different confirmation message
+    const confirmMessage = isCashPayment()
+      ? 'Confirm cash payment and approve this appointment?\n\nThis will mark the payment as received at the counter.'
+      : 'Verify this payment and confirm the appointment?\n\nThis action cannot be undone.';
+    
+    if (!window.confirm(confirmMessage)) {
       return;
     }
     
@@ -91,7 +103,8 @@ const PaymentVerificationModal = ({ appointment, onClose, onVerified, onRejected
     try {
       console.log('Verifying payment with:', { 
         appointmentId: appointmentId, 
-        receptionistId: receptionistId 
+        receptionistId: receptionistId,
+        isCashPayment: isCashPayment()
       });
       
       const result = await verifyAndAssignAppointment(appointmentId, receptionistId);
@@ -99,7 +112,10 @@ const PaymentVerificationModal = ({ appointment, onClose, onVerified, onRejected
       console.log('Verification result:', result);
       
       if (result && result.success) {
-        toast.success('Payment verified! Appointment confirmed.');
+        const successMsg = isCashPayment()
+          ? 'Cash payment recorded! Appointment confirmed.'
+          : 'Payment verified! Appointment confirmed.';
+        toast.success(successMsg);
         if (onVerified) onVerified(appointmentId);
         onClose();
       } else {
@@ -240,7 +256,7 @@ const PaymentVerificationModal = ({ appointment, onClose, onVerified, onRejected
   };
 
   const getPaymentMethodIcon = () => {
-    switch (enrichedAppointment.paymentMethod) {
+    switch (enrichedAppointment.paymentMethod?.toLowerCase()) {
       case 'cash': return faMoneyBillWave;
       case 'bank': return faUniversity;
       case 'card': return faCreditCard;
@@ -249,7 +265,7 @@ const PaymentVerificationModal = ({ appointment, onClose, onVerified, onRejected
   };
 
   const getPaymentMethodColor = () => {
-    switch (enrichedAppointment.paymentMethod) {
+    switch (enrichedAppointment.paymentMethod?.toLowerCase()) {
       case 'cash': return 'text-green-600';
       case 'bank': return 'text-blue-600';
       case 'card': return 'text-purple-600';
@@ -365,7 +381,7 @@ const PaymentVerificationModal = ({ appointment, onClose, onVerified, onRejected
         <div className="bg-white dark:bg-gray-800 rounded-xl p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
           <div className="flex justify-between items-center mb-4 sticky top-0 bg-white dark:bg-gray-800 pb-2">
             <h3 className="text-xl font-semibold text-gray-900 dark:text-white">
-              Verify Payment
+              {isCashPayment() ? 'Confirm Cash Payment' : 'Verify Payment'}
             </h3>
             <button
               onClick={onClose}
@@ -416,7 +432,7 @@ const PaymentVerificationModal = ({ appointment, onClose, onVerified, onRejected
                   <FontAwesomeIcon icon={getPaymentMethodIcon()} className={`h-5 w-5 mr-2 ${getPaymentMethodColor()}`} />
                   <span className="text-sm text-gray-700 dark:text-gray-300">Payment Method</span>
                 </div>
-                <span className="text-sm font-medium capitalize">{enrichedAppointment.paymentMethod || 'Not specified'}</span>
+                <span className="text-sm font-medium capitalize">{enrichedAppointment.paymentMethod || 'Cash'}</span>
               </div>
               
               <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
@@ -431,8 +447,8 @@ const PaymentVerificationModal = ({ appointment, onClose, onVerified, onRejected
             </div>
           </div>
 
-          {/* Payment Proof Section */}
-          {enrichedAppointment.paymentProof && (
+          {/* Payment Proof Section - Only show if not cash payment */}
+          {!isCashPayment() && enrichedAppointment.paymentProof && (
             <div className="mb-4">
               <h4 className="text-md font-semibold text-gray-900 dark:text-white mb-3 flex items-center">
                 <FontAwesomeIcon icon={faEye} className="mr-2 text-blue-500" />
@@ -468,18 +484,44 @@ const PaymentVerificationModal = ({ appointment, onClose, onVerified, onRejected
             </div>
           )}
 
-          {/* Verification Checklist */}
-          <div className="bg-yellow-50 dark:bg-yellow-900/30 p-4 rounded-lg mb-4">
-            <h4 className="text-sm font-semibold text-yellow-800 dark:text-yellow-200 mb-2 flex items-center">
+          {/* For cash payments, show a special message */}
+          {isCashPayment() && (
+            <div className="bg-green-50 dark:bg-green-900/30 p-4 rounded-lg mb-4">
+              <div className="flex items-start">
+                <FontAwesomeIcon icon={faShieldAlt} className="text-green-600 dark:text-green-400 mr-3 mt-0.5" />
+                <div>
+                  <h4 className="text-sm font-semibold text-green-800 dark:text-green-200 mb-1">
+                    Cash Payment Confirmation
+                  </h4>
+                  <p className="text-xs text-green-700 dark:text-green-300">
+                    This patient has selected cash payment at the counter. Please verify that the cash 
+                    has been received and confirm the appointment.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Verification Checklist - Different for cash vs online payments */}
+          <div className={`p-4 rounded-lg mb-4 ${isCashPayment() ? 'bg-green-50 dark:bg-green-900/30' : 'bg-yellow-50 dark:bg-yellow-900/30'}`}>
+            <h4 className="text-sm font-semibold mb-2 flex items-center">
               <FontAwesomeIcon icon={faCheck} className="mr-2" />
-              Verification Checklist
+              {isCashPayment() ? 'Cash Payment Confirmation Checklist' : 'Verification Checklist'}
             </h4>
-            <ul className="text-xs text-yellow-700 dark:text-yellow-300 space-y-1 list-disc list-inside">
-              <li>Verify the transaction ID matches the bank statement/receipt</li>
-              <li>Check that the amount matches the appointment fee</li>
-              <li>Confirm the payment date is correct</li>
-              <li>Ensure the payment proof is clear and valid</li>
-            </ul>
+            {isCashPayment() ? (
+              <ul className="text-xs space-y-1 list-disc list-inside">
+                <li className="text-green-700 dark:text-green-300">✓ Cash amount received matches appointment fee</li>
+                <li className="text-green-700 dark:text-green-300">✓ Payment receipt issued to patient</li>
+                <li className="text-green-700 dark:text-green-300">✓ Patient confirmed for appointment</li>
+              </ul>
+            ) : (
+              <ul className="text-xs text-yellow-700 dark:text-yellow-300 space-y-1 list-disc list-inside">
+                <li>Verify the transaction ID matches the bank statement/receipt</li>
+                <li>Check that the amount matches the appointment fee</li>
+                <li>Confirm the payment date is correct</li>
+                <li>Ensure the payment proof is clear and valid</li>
+              </ul>
+            )}
           </div>
 
           {/* Action Buttons */}
@@ -501,17 +543,21 @@ const PaymentVerificationModal = ({ appointment, onClose, onVerified, onRejected
             <button
               onClick={handleVerifyAndConfirm}
               disabled={loading}
-              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition disabled:opacity-50 flex items-center"
+              className={`px-4 py-2 rounded-lg transition disabled:opacity-50 flex items-center ${
+                isCashPayment() 
+                  ? 'bg-green-600 hover:bg-green-700' 
+                  : 'bg-green-600 hover:bg-green-700'
+              }`}
             >
               {loading ? (
                 <>
                   <FontAwesomeIcon icon={faSpinner} className="animate-spin mr-2" />
-                  Verifying...
+                  {isCashPayment() ? 'Confirming...' : 'Verifying...'}
                 </>
               ) : (
                 <>
                   <FontAwesomeIcon icon={faCheck} className="mr-2" />
-                  Verify & Confirm Appointment
+                  {isCashPayment() ? 'Confirm & Approve Appointment' : 'Verify & Confirm Appointment'}
                 </>
               )}
             </button>

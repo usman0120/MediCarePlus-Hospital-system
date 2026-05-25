@@ -9,7 +9,8 @@ import {
   faSpinner,
   faExclamationTriangle,
   faStar,
-  faGraduationCap
+  faGraduationCap,
+  faHourglassHalf
 } from '@fortawesome/free-solid-svg-icons';
 import { 
   getUsersByRole,
@@ -40,6 +41,7 @@ const AppointmentBooking = ({
   const [, setSpecializations] = useState([]);
   const [doctorsLoaded, setDoctorsLoaded] = useState(false);
   const [departmentsLoaded, setDepartmentsLoaded] = useState(false);
+  const [isTodaySelected, setIsTodaySelected] = useState(false);
   const [formData, setFormData] = useState({
     departmentId: '',
     doctorId: '',
@@ -136,10 +138,8 @@ const AppointmentBooking = ({
     if (initialDoctorId && doctorsLoaded && departmentsLoaded && doctors.length > 0 && departments.length > 0) {
       const doctor = doctors.find(d => d.id === initialDoctorId);
       if (doctor) {
-        // Find department by doctor's department name or ID
         let dept = departments.find(d => d.name === doctor.department || d.id === doctor.department);
         
-        // If not found, try to find department by name match
         if (!dept && doctor.department) {
           dept = departments.find(d => d.name?.toLowerCase() === doctor.department?.toLowerCase());
         }
@@ -175,6 +175,12 @@ const AppointmentBooking = ({
       safeSetState(setFilteredDoctors, filtered);
     }
   }, [formData.departmentId, doctors, departments]);
+
+  // Check if selected date is today
+  useEffect(() => {
+    const today = new Date().toISOString().split('T')[0];
+    setIsTodaySelected(formData.date === today);
+  }, [formData.date]);
 
   // Fetch slots when doctor and date change
   useEffect(() => {
@@ -221,6 +227,7 @@ const AppointmentBooking = ({
         [name]: type === 'checkbox' ? checked : value
       };
       
+      // Reset time when doctor or date changes
       if (name === 'doctorId' || name === 'date') {
         newData.time = '';
         setSelectedSlot(null);
@@ -239,6 +246,20 @@ const AppointmentBooking = ({
       toast.error('This slot is not available');
       return;
     }
+    
+    // Double-check for today's date if slot is in the past
+    if (isTodaySelected) {
+      const now = new Date();
+      const [slotHour, slotMinute] = slot.time.split(':').map(Number);
+      const currentHour = now.getHours();
+      const currentMinute = now.getMinutes();
+      
+      if (slotHour < currentHour || (slotHour === currentHour && slotMinute < currentMinute)) {
+        toast.error('Cannot book a time slot that has already passed');
+        return;
+      }
+    }
+    
     setSelectedSlot(slot);
     setFormData(prev => ({ ...prev, time: slot.time }));
     setErrors(prev => ({ ...prev, time: null }));
@@ -267,6 +288,20 @@ const AppointmentBooking = ({
       const firstError = Object.values(validation.errors)[0];
       if (firstError) toast.error(firstError);
       return;
+    }
+
+    // Final check for past time slot on today's date
+    const today = new Date().toISOString().split('T')[0];
+    if (formData.date === today) {
+      const now = new Date();
+      const [slotHour, slotMinute] = formData.time.split(':').map(Number);
+      const currentHour = now.getHours();
+      const currentMinute = now.getMinutes();
+      
+      if (slotHour < currentHour || (slotHour === currentHour && slotMinute < currentMinute)) {
+        toast.error('Cannot book a time slot that has already passed');
+        return;
+      }
     }
 
     setLoading(true);
@@ -315,6 +350,7 @@ const AppointmentBooking = ({
     return today.toISOString().split('T')[0];
   };
 
+
   const getMaxDate = () => {
     const max = new Date();
     max.setMonth(max.getMonth() + 3);
@@ -323,6 +359,17 @@ const AppointmentBooking = ({
 
   const isSlotBooked = (time) => {
     return doctorSchedule.some(apt => apt.time === time && apt.status !== 'cancelled');
+  };
+
+  const isSlotPast = (time) => {
+    if (!isTodaySelected) return false;
+    
+    const now = new Date();
+    const [slotHour, slotMinute] = time.split(':').map(Number);
+    const currentHour = now.getHours();
+    const currentMinute = now.getMinutes();
+    
+    return slotHour < currentHour || (slotHour === currentHour && slotMinute < currentMinute);
   };
 
   const renderRating = (rating) => {
@@ -337,6 +384,12 @@ const AppointmentBooking = ({
       stars.push(<FontAwesomeIcon key={`empty-${i}`} icon={faStar} className="text-gray-300" />);
     }
     return stars;
+  };
+
+  // Get current time display for info message
+  const getCurrentTimeDisplay = () => {
+    const now = new Date();
+    return now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
   // Show loading until initial data is loaded
@@ -484,6 +537,12 @@ const AppointmentBooking = ({
           {errors.date && (
             <p className="mt-1 text-sm text-red-600">{errors.date}</p>
           )}
+          {isTodaySelected && (
+            <p className="mt-1 text-xs text-orange-600 flex items-center">
+              <FontAwesomeIcon icon={faHourglassHalf} className="mr-1" />
+              Current time: {getCurrentTimeDisplay()} - Past time slots are not available
+            </p>
+          )}
         </div>
 
         {/* Time Slots */}
@@ -498,24 +557,36 @@ const AppointmentBooking = ({
                 <FontAwesomeIcon icon={faSpinner} className="animate-spin text-blue-600 text-2xl" />
               </div>
             ) : (
-              <div className="grid grid-cols-3 gap-2">
-                {availableSlots.length === 0 ? (
-                  <p className="col-span-3 text-center text-gray-500 dark:text-gray-400 py-4">
-                    No available slots for this date
-                  </p>
-                ) : (
-                  availableSlots.map((slot, index) => {
+              <>
+                {isTodaySelected && availableSlots.filter(slot => !isSlotPast(slot.time)).length === 0 && (
+                  <div className="mb-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg">
+                    <p className="text-sm text-yellow-800 dark:text-yellow-200 flex items-center">
+                      <FontAwesomeIcon icon={faExclamationTriangle} className="mr-2" />
+                      No available time slots for the remainder of today. Please select a different date.
+                    </p>
+                  </div>
+                )}
+                <div className="grid grid-cols-3 gap-2">
+                  {availableSlots.map((slot, index) => {
                     const booked = isSlotBooked(slot.time);
+                    const isPast = isSlotPast(slot.time);
                     const isSelected = selectedSlot?.time === slot.time;
+                    const isAvailable = slot.available && !booked && !isPast;
+                    
+                    let tooltipText = '';
+                    if (isPast) tooltipText = 'This time has already passed';
+                    else if (booked) tooltipText = 'Already booked';
+                    else if (!slot.available) tooltipText = 'Doctor not available at this time';
                     
                     return (
                       <button
                         key={index}
                         type="button"
-                        onClick={() => handleSlotSelect(slot)}
-                        disabled={!slot.available || booked}
+                        onClick={() => isAvailable && handleSlotSelect(slot)}
+                        disabled={!isAvailable}
+                        title={tooltipText}
                         className={`p-2 text-sm rounded-lg border transition ${
-                          !slot.available || booked
+                          !isAvailable
                             ? 'bg-gray-100 text-gray-400 cursor-not-allowed border-gray-200 dark:bg-gray-700 dark:text-gray-500'
                             : isSelected
                               ? 'bg-blue-600 text-white border-blue-600'
@@ -523,14 +594,18 @@ const AppointmentBooking = ({
                         }`}
                       >
                         {slot.display}
-                        {booked && (
-                          <FontAwesomeIcon icon={faExclamationTriangle} className="ml-1 text-xs" />
-                        )}
+                        {isPast && <FontAwesomeIcon icon={faHourglassHalf} className="ml-1 text-xs" />}
+                        {booked && !isPast && <FontAwesomeIcon icon={faExclamationTriangle} className="ml-1 text-xs" />}
                       </button>
                     );
-                  })
+                  })}
+                </div>
+                {availableSlots.length === 0 && !checkingSlot && (
+                  <p className="text-center text-gray-500 dark:text-gray-400 py-4">
+                    No available slots for this date
+                  </p>
                 )}
-              </div>
+              </>
             )}
             {errors.time && (
               <p className="mt-1 text-sm text-red-600">{errors.time}</p>
@@ -592,9 +667,15 @@ const AppointmentBooking = ({
             <FontAwesomeIcon icon={faExclamationTriangle} className="mr-1" />
             Your appointment request will be sent for approval. You'll be notified once confirmed.
             Payment is required after approval to confirm the appointment.
+            {isTodaySelected && (
+              <span className="block mt-1 text-orange-600 dark:text-orange-400">
+                ⏰ Time slots that have already passed today are not shown.
+              </span>
+            )}
           </p>
         </div>
       </form>
+      
     </div>
   );
 };

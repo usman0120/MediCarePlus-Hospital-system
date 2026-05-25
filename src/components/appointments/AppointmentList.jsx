@@ -16,6 +16,8 @@ const AppointmentList = ({
   onCheckIn,
   onCancel,
   onViewDetails,
+  onStartConsultation,
+  onViewConsultationNotes,
   onChatWithDoctor,
   onPaySuccess,
   onRateDoctor,
@@ -269,6 +271,8 @@ const AppointmentList = ({
               onCheckIn={onCheckIn}
               onCancel={onCancel}
               onViewDetails={onViewDetails}
+              onStartConsultation={onStartConsultation}
+              onViewConsultationNotes={onViewConsultationNotes}
               onChatWithDoctor={onChatWithDoctor}
               onMarkCompleted={onMarkCompleted}
               onPaySuccess={onPaySuccess}
