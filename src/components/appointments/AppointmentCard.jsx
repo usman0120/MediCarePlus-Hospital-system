@@ -1,9 +1,7 @@
-import React, { useState, toast } from 'react';
+import React, { useState } from 'react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
   faCalendarCheck,
-  faClock,
-  faUserMd,
   faUserInjured,
   faCheckCircle,
   faTimesCircle,
@@ -16,11 +14,15 @@ import {
   faMoneyBillWave,
   faPrint,
   faStar,
-  faCalendarAlt
+  faCalendarAlt,
+  faChevronRight,
+  faMapMarkerAlt,
+  faCreditCard
 } from '@fortawesome/free-solid-svg-icons';
 import { generateAppointmentSlip } from '../../database';
 import PaymentModal from '../PaymentModal';
 import RatingModal from '../RatingModal';
+import toast from 'react-hot-toast';
 
 const AppointmentCard = ({ 
   appointment, 
@@ -40,24 +42,25 @@ const AppointmentCard = ({
 }) => {
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showRatingModal, setShowRatingModal] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   const getStatusColor = (status) => {
     switch (status?.toLowerCase()) {
       case 'pending':
-        return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200';
+        return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300';
       case 'approved':
-        return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200';
+        return 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300';
       case 'confirmed':
-        return 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200';
+        return 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300';
       case 'checked-in':
-        return 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200';
+        return 'bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-300';
       case 'completed':
         return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300';
       case 'cancelled':
       case 'rejected':
-        return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200';
+        return 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300';
       case 'no-show':
-        return 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200';
+        return 'bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300';
       default:
         return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300';
     }
@@ -81,8 +84,18 @@ const AppointmentCard = ({
     }
   };
 
+  const getStatusText = (status) => {
+    switch (status?.toLowerCase()) {
+      case 'approved': return 'Approved - Payment Pending';
+      case 'confirmed': return 'Confirmed - Ready for Check-in';
+      case 'checked-in': return 'Checked In - With Doctor';
+      default: return status?.charAt(0).toUpperCase() + status?.slice(1);
+    }
+  };
+
   const handlePrintSlip = () => {
     generateAppointmentSlip(appointment);
+    toast.success('Appointment slip downloaded');
   };
 
   const isPastAppointment = () => {
@@ -98,7 +111,6 @@ const AppointmentCard = ({
   };
 
   const canRate = () => {
-    // Rate is enabled after appointment is completed
     return appointment.status === 'completed' && role === 'patient';
   };
 
@@ -106,293 +118,323 @@ const AppointmentCard = ({
     return role === 'patient' && appointment.status === 'approved' && appointment.paymentStatus !== 'paid';
   };
 
-const handlePaymentSuccess = (paymentData) => {
-  setShowPaymentModal(false);
-  if (onPaySuccess) {
-    onPaySuccess(appointment.id, paymentData);
-  }
-  toast.success('Payment submitted. Waiting for verification.');
-};
+  const handlePaymentSuccess = (paymentData) => {
+    setShowPaymentModal(false);
+    if (onPaySuccess) {
+      onPaySuccess(appointment.id, paymentData);
+    }
+    toast.success('Payment submitted. Waiting for verification.');
+  };
 
-const handleRatingSuccess = (ratingData) => {
-  setShowRatingModal(false);
-  if (onRateDoctor) {
-    onRateDoctor(ratingData);
-  }
-  toast.success('Thank you for your feedback!');
-};
+  const handleRatingSuccess = (ratingData) => {
+    setShowRatingModal(false);
+    if (onRateDoctor) {
+      onRateDoctor(ratingData);
+    }
+    toast.success('Thank you for your feedback!');
+  };
 
   return (
     <>
-      <div className={`bg-white dark:bg-gray-800 rounded-lg shadow p-4 border-l-4 ${
-        appointment.isEmergency ? 'border-red-500' : 'border-blue-500'
+      <div className={`bg-white dark:bg-gray-800 rounded-xl shadow-md hover:shadow-lg transition-all duration-300 overflow-hidden ${
+        appointment.status === 'pending' ? 'border-l-4 border-l-yellow-500' :
+        appointment.status === 'confirmed' ? 'border-l-4 border-l-green-500' :
+        appointment.status === 'checked-in' ? 'border-l-4 border-l-purple-500' :
+        appointment.status === 'completed' ? 'border-l-4 border-l-gray-500' : ''
       }`}>
-        {/* Header */}
-        <div className="flex justify-between items-start mb-3">
-          <div className="flex items-center space-x-3 flex-wrap gap-2">
-            {appointment.isEmergency && (
-              <span className="px-2 py-1 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 rounded-full text-xs font-semibold animate-pulse">
-                EMERGENCY
+        
+        {/* Card Header */}
+        <div className="p-4 border-b border-gray-100 dark:border-gray-700">
+          <div className="flex flex-wrap justify-between items-center gap-3">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`px-2.5 py-1 rounded-full text-xs font-semibold flex items-center gap-1 ${getStatusColor(appointment.status)}`}>
+                <FontAwesomeIcon icon={getStatusIcon(appointment.status)} className="text-xs" />
+                {getStatusText(appointment.status)}
               </span>
-            )}
-            <span className={`px-3 py-1 rounded-full text-xs font-semibold flex items-center ${getStatusColor(appointment.status)}`}>
-              <FontAwesomeIcon icon={getStatusIcon(appointment.status)} className="mr-1" />
-              {appointment.status?.toUpperCase()}
-            </span>
-            {role === 'patient' && appointment.paymentStatus && (
-              <span className={`text-xs px-2 py-1 rounded-full flex items-center ${
-                appointment.paymentStatus === 'paid' 
-                  ? 'bg-green-100 text-green-800' 
-                  : 'bg-yellow-100 text-yellow-800'
-              }`}>
-                <FontAwesomeIcon icon={faMoneyBillWave} className="mr-1 text-xs" />
-                Payment: {appointment.paymentStatus}
-              </span>
-            )}
-          </div>
-          <button
-            onClick={handlePrintSlip}
-            className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-            title="Print Appointment Slip"
-          >
-            <FontAwesomeIcon icon={faPrint} />
-          </button>
-        </div>
-
-        {/* Patient/Doctor Info */}
-        <div className="mb-3">
-          {role === 'patient' ? (
-            <div className="flex items-center">
-              <FontAwesomeIcon icon={faUserMd} className="text-blue-500 mr-2" />
-              <span className="font-medium text-gray-900 dark:text-white">
-                Dr. {appointment.doctorName || 'Not Assigned'}
-              </span>
-              {appointment.doctorSpecialization && (
-                <span className="ml-2 text-sm text-gray-500 dark:text-gray-400">
-                  ({appointment.doctorSpecialization})
+              {role === 'patient' && appointment.paymentStatus && (
+                <span className={`text-xs px-2 py-1 rounded-full flex items-center gap-1 ${
+                  appointment.paymentStatus === 'paid' 
+                    ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300' 
+                    : 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300'
+                }`}>
+                  <FontAwesomeIcon icon={faCreditCard} className="text-xs" />
+                  {appointment.paymentStatus === 'paid' ? 'Paid' : 'Payment Pending'}
                 </span>
               )}
             </div>
-          ) : (
-            <div className="flex items-center">
-              <FontAwesomeIcon icon={faUserInjured} className="text-green-500 mr-2" />
-              <span className="font-medium text-gray-900 dark:text-white">
-                {appointment.patientName || 'Unknown Patient'}
-              </span>
+            
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handlePrintSlip}
+                className="p-1.5 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition"
+                title="Print Appointment Slip"
+              >
+                <FontAwesomeIcon icon={faPrint} />
+              </button>
+              <button
+                onClick={() => setIsExpanded(!isExpanded)}
+                className="p-1.5 text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition"
+              >
+                <FontAwesomeIcon icon={faChevronRight} className={`transition-transform duration-200 ${isExpanded ? 'rotate-90' : ''}`} />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Card Body */}
+        <div className="p-4">
+          <div className="flex flex-col sm:flex-row justify-between gap-4">
+            {/* Left Section - Person Info */}
+            <div className="flex-1">
+              {role === 'patient' ? (
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 rounded-full flex items-center justify-center text-white font-bold text-lg shadow-md">
+                    {appointment.doctorName?.charAt(0) || 'D'}
+                  </div>
+                  <div>
+                    <p className="font-semibold text-gray-900 dark:text-white text-lg">
+                      Dr. {appointment.doctorName || 'Not Assigned'}
+                    </p>
+                    {appointment.doctorSpecialization && (
+                      <p className="text-sm text-gray-500 dark:text-gray-400">
+                        {appointment.doctorSpecialization}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 bg-gradient-to-br from-green-500 to-green-600 rounded-full flex items-center justify-center text-white font-bold text-lg shadow-md">
+                    {appointment.patientName?.charAt(0) || 'P'}
+                  </div>
+                  <div>
+                    <p className="font-semibold text-gray-900 dark:text-white text-lg">
+                      {appointment.patientName || 'Unknown Patient'}
+                    </p>
+                    <div className="flex flex-wrap items-center gap-3 text-sm text-gray-500 dark:text-gray-400">
+                      {appointment.patientPhone && (
+                        <span className="flex items-center gap-1">
+                          <FontAwesomeIcon icon={faPhone} className="text-xs" />
+                          {appointment.patientPhone}
+                        </span>
+                      )}
+                      {appointment.patientEmail && (
+                        <span className="flex items-center gap-1 truncate max-w-[200px]">
+                          <FontAwesomeIcon icon={faEnvelope} className="text-xs" />
+                          {appointment.patientEmail}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Right Section - Date & Time */}
+            <div className="flex items-center gap-4 text-sm">
+              <div className="text-center px-4 py-2 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                <p className="text-xs text-gray-500 dark:text-gray-400">Date</p>
+                <p className="font-semibold text-gray-900 dark:text-white">{appointment.date}</p>
+              </div>
+              <div className="text-center px-4 py-2 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                <p className="text-xs text-gray-500 dark:text-gray-400">Time</p>
+                <p className="font-semibold text-gray-900 dark:text-white">{appointment.time}</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Fee Display */}
+          {(role === 'patient' || role === 'receptionist') && appointment.paymentAmount && (
+            <div className="mt-3 flex justify-end">
+              <div className="text-right">
+                <p className="text-xs text-gray-500 dark:text-gray-400">Consultation Fee</p>
+                <p className="text-lg font-bold text-green-600 dark:text-green-400">
+                  {formatCurrency(appointment.paymentAmount)}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Expanded Details */}
+          {isExpanded && (
+            <div className="mt-4 pt-4 border-t border-gray-100 dark:border-gray-700 animate-fadeIn">
+              {/* Reason */}
+              {appointment.reason && (
+                <div className="mb-3 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mb-1 flex items-center gap-1">
+                    <FontAwesomeIcon icon={faNotesMedical} />
+                    Reason for Visit
+                  </p>
+                  <p className="text-sm text-gray-700 dark:text-gray-300">{appointment.reason}</p>
+                </div>
+              )}
+
+              {/* Rejection Reason */}
+              {appointment.status === 'rejected' && appointment.rejectionReason && (
+                <div className="mb-3 p-3 bg-red-50 dark:bg-red-900/20 rounded-lg">
+                  <p className="text-xs text-red-600 dark:text-red-400 mb-1 flex items-center gap-1">
+                    <FontAwesomeIcon icon={faTimesCircle} />
+                    Rejection Reason
+                  </p>
+                  <p className="text-sm text-red-700 dark:text-red-300">{appointment.rejectionReason}</p>
+                </div>
+              )}
+
+              {/* Department Info for non-patient roles */}
+              {role !== 'patient' && appointment.department && (
+                <div className="mb-3 flex items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+                  <FontAwesomeIcon icon={faMapMarkerAlt} className="text-gray-400" />
+                  <span>Department: {appointment.department}</span>
+                </div>
+              )}
             </div>
           )}
         </div>
 
-        {/* Appointment Details */}
-        <div className="grid grid-cols-2 gap-3 mb-3 text-sm">
-          <div className="flex items-center text-gray-600 dark:text-gray-400">
-            <FontAwesomeIcon icon={faCalendarAlt} className="mr-2 w-4" />
-            {appointment.date}
-          </div>
-          <div className="flex items-center text-gray-600 dark:text-gray-400">
-            <FontAwesomeIcon icon={faClock} className="mr-2 w-4" />
-            {appointment.time}
-          </div>
-          {role !== 'patient' && (
-            <>
-              <div className="flex items-center text-gray-600 dark:text-gray-400">
-                <FontAwesomeIcon icon={faPhone} className="mr-2 w-4" />
-                {appointment.patientPhone || 'N/A'}
-              </div>
-              <div className="flex items-center text-gray-600 dark:text-gray-400 truncate">
-                <FontAwesomeIcon icon={faEnvelope} className="mr-2 w-4" />
-                {appointment.patientEmail || 'N/A'}
-              </div>
-            </>
-          )}
-        </div>
-
-        {/* Fee Display */}
-        {(role === 'patient' || role === 'receptionist') && appointment.paymentAmount && (
-          <div className="mb-3 text-sm">
-            <span className="text-gray-600 dark:text-gray-400">Consultation Fee:</span>
-            <span className="ml-2 font-semibold text-green-600">
-              PKR {appointment.paymentAmount?.toLocaleString()}
-            </span>
-          </div>
-        )}
-
-        {/* Reason */}
-        {appointment.reason && (
-          <div className="mb-3 p-2 bg-gray-50 dark:bg-gray-700 rounded-lg">
-            <p className="text-sm text-gray-700 dark:text-gray-300">
-              <FontAwesomeIcon icon={faNotesMedical} className="mr-2 text-gray-500" />
-              {appointment.reason}
-            </p>
-          </div>
-        )}
-
-        {/* Rejection Reason */}
-        {appointment.status === 'rejected' && appointment.rejectionReason && (
-          <div className="mb-3 p-2 bg-red-50 dark:bg-red-900 rounded-lg">
-            <p className="text-sm text-red-700 dark:text-red-200">
-              <span className="font-semibold">Rejection Reason:</span> {appointment.rejectionReason}
-            </p>
-          </div>
-        )}
-
         {/* Actions */}
         {showActions && (
-          <div className="flex flex-wrap justify-end gap-2 mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
-            {/* Receptionist Actions */}
-            {role === 'receptionist' && appointment.status === 'pending' && (
-              <>
+          <div className="px-4 py-3 bg-gray-50 dark:bg-gray-700/50 border-t border-gray-100 dark:border-gray-700">
+            <div className="flex flex-wrap justify-end gap-2">
+              {/* Receptionist Actions */}
+              {role === 'receptionist' && appointment.status === 'pending' && (
+                <>
+                  <button
+                    onClick={() => onApprove(appointment.id)}
+                    className="px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm flex items-center gap-1"
+                  >
+                    <FontAwesomeIcon icon={faCheckCircle} />
+                    Approve
+                  </button>
+                  <button
+                    onClick={() => onReject(appointment.id)}
+                    className="px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition text-sm flex items-center gap-1"
+                  >
+                    <FontAwesomeIcon icon={faTimesCircle} />
+                    Reject
+                  </button>
+                </>
+              )}
+
+              {/* Receptionist - Check In Patient */}
+              {role === 'receptionist' && appointment.status === 'confirmed' && onCheckIn && (
                 <button
-                  onClick={() => onApprove(appointment.id)}
-                  className="px-3 py-1 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm"
+                  onClick={() => onCheckIn(appointment.id)}
+                  className="px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition text-sm flex items-center gap-1"
                 >
-                  <FontAwesomeIcon icon={faCheckCircle} className="mr-1" />
-                  Approve
+                  <FontAwesomeIcon icon={faUserInjured} />
+                  Check In
                 </button>
+              )}
+
+              {/* Receptionist - Verify Payment */}
+              {role === 'receptionist' && appointment.paymentStatus === 'paid' && appointment.status === 'approved' && onCheckIn && (
                 <button
-                  onClick={() => onReject(appointment.id)}
-                  className="px-3 py-1 bg-red-600 text-white rounded-lg hover:bg-red-700 transition text-sm"
+                  onClick={() => onCheckIn(appointment.id)}
+                  className="px-3 py-1.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm flex items-center gap-1"
                 >
-                  <FontAwesomeIcon icon={faTimesCircle} className="mr-1" />
-                  Reject
+                  <FontAwesomeIcon icon={faCheckCircle} />
+                  Verify & Assign
                 </button>
-              </>
-            )}
+              )}
 
-            {/* Receptionist Actions - Check In Patient (after payment confirmed) */}
-{role === 'receptionist' && appointment.status === 'confirmed' && onCheckIn && (
-  <button
-    onClick={() => onCheckIn(appointment.id)}
-    className="px-3 py-1 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition text-sm"
-  >
-    <FontAwesomeIcon icon={faUserInjured} className="mr-1" />
-    Check In Patient
-  </button>
-)}
+              {/* Doctor Actions */}
+              {role === 'doctor' && (
+                <>
+                  {(appointment.status === 'confirmed' || appointment.status === 'checked-in') && (
+                    <button
+                      onClick={() => onStartConsultation && onStartConsultation(appointment)}
+                      className="px-3 py-1.5 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition text-sm flex items-center gap-1"
+                    >
+                      <FontAwesomeIcon icon={faStethoscope} />
+                      Start Consultation
+                    </button>
+                  )}
+                  {(appointment.status === 'checked-in' || appointment.status === 'in-progress') && onMarkCompleted && (
+                    <button
+                      onClick={() => onMarkCompleted(appointment.id)}
+                      className="px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm flex items-center gap-1"
+                    >
+                      <FontAwesomeIcon icon={faCheckCircle} />
+                      Complete Visit
+                    </button>
+                  )}
+                  {onChatWithDoctor && (
+                    <button
+                      onClick={() => onChatWithDoctor(appointment.patientId, appointment.patientName)}
+                      className="px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm flex items-center gap-1"
+                      disabled={!appointment.patientId}
+                    >
+                      <FontAwesomeIcon icon={faComment} />
+                      Chat
+                    </button>
+                  )}
+                </>
+              )}
 
-{/* Receptionist Verify Payment (paid status) */}
-{role === 'receptionist' && appointment.paymentStatus === 'paid' && appointment.status === 'approved' && onCheckIn && (
-  <button
-    onClick={() => onCheckIn(appointment.id)}
-    className="px-3 py-1 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition text-sm"
-  >
-    <FontAwesomeIcon icon={faCheckCircle} className="mr-1" />
-    Verify And Assign
-  </button>
-)}
+              {/* Patient Actions - Cancel */}
+              {role === 'patient' && canCancel() && (
+                <button
+                  onClick={() => onCancel(appointment.id)}
+                  className="px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition text-sm flex items-center gap-1"
+                >
+                  <FontAwesomeIcon icon={faTimesCircle} />
+                  Cancel
+                </button>
+              )}
 
-{/* Doctor Actions */}
-{role === 'doctor' && (
-  <>
-    {(appointment.status === 'confirmed' || appointment.status === 'checked-in') && (
-      <button
-        onClick={() => onStartConsultation && onStartConsultation(appointment)}
-        className="px-3 py-1 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition text-sm flex items-center"
-      >
-        <FontAwesomeIcon icon={faStethoscope} className="mr-1" />
-        Start Consultation
-      </button>
-    )}
+              {/* Patient Actions - View Notes */}
+              {role === 'patient' && onViewConsultationNotes && appointment.status === 'completed' && (
+                <button
+                  onClick={() => onViewConsultationNotes(appointment)}
+                  className="px-3 py-1.5 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition text-sm flex items-center gap-1"
+                >
+                  <FontAwesomeIcon icon={faNotesMedical} />
+                  View Notes
+                </button>
+              )}
 
-    {/* Doctor Actions - Complete Visit for checked-in appointments */}
-    {appointment.status === 'checked-in' && onMarkCompleted && (
-      <button
-        onClick={() => onMarkCompleted(appointment.id)}
-        className="px-3 py-1 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm"
-      >
-        <FontAwesomeIcon icon={faCheckCircle} className="mr-1" />
-        Complete Visit
-      </button>
-    )}
+              {/* Patient Actions - Pay Fee */}
+              {needsPayment() && (
+                <button
+                  onClick={() => setShowPaymentModal(true)}
+                  className="px-3 py-1.5 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition text-sm flex items-center gap-1"
+                >
+                  <FontAwesomeIcon icon={faMoneyBillWave} />
+                  Pay Now
+                </button>
+              )}
 
-    {/* Also show for in-progress if at doctor's end */}
-    {appointment.status === 'in-progress' && onMarkCompleted && (
-      <button
-        onClick={() => onMarkCompleted(appointment.id)}
-        className="px-3 py-1 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm"
-      >
-        Complete Visit
-      </button>
-    )}
-  </>
-)}
+              {/* Patient Actions - Chat with Doctor */}
+              {role === 'patient' && (appointment.status === 'confirmed' || appointment.status === 'checked-in' || appointment.status === 'completed') && onChatWithDoctor && (
+                <button
+                  onClick={() => onChatWithDoctor(appointment.doctorId, appointment.doctorName)}
+                  className="px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm flex items-center gap-1"
+                >
+                  <FontAwesomeIcon icon={faComment} />
+                  Chat
+                </button>
+              )}
 
-{/* Chat button for doctors - show for all active statuses */}
-{role === 'doctor' && onChatWithDoctor && (
-  <button
-    onClick={() => onChatWithDoctor(appointment.patientId, appointment.patientName)}
-    className="px-3 py-1 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm flex items-center"
-    disabled={!appointment.patientId}
-  >
-    <FontAwesomeIcon icon={faComment} className="mr-1" />
-    Chat
-    {appointment.patientName && ` with ${appointment.patientName.split(' ')[0]}`}
-  </button>
-)}
-            
+              {/* Patient Actions - Rate Doctor */}
+              {canRate() && (
+                <button
+                  onClick={() => setShowRatingModal(true)}
+                  className="px-3 py-1.5 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 transition text-sm flex items-center gap-1"
+                >
+                  <FontAwesomeIcon icon={faStar} />
+                  Rate
+                </button>
+              )}
 
-            {/* Patient Actions - Cancel */}
-            {role === 'patient' && canCancel() && (
+              {/* View Details - Common */}
               <button
-                onClick={() => onCancel(appointment.id)}
-                className="px-3 py-1 bg-red-600 text-white rounded-lg hover:bg-red-700 transition text-sm"
+                onClick={() => onViewDetails(appointment)}
+                className="px-3 py-1.5 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition text-sm flex items-center gap-1"
               >
-                Cancel Appointment
+                <FontAwesomeIcon icon={faCalendarAlt} />
+                Details
               </button>
-            )}
-
-            {role === 'patient' && onViewConsultationNotes && (
-  <button
-    onClick={() => onViewConsultationNotes(appointment)}
-    className="px-3 py-1 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition text-sm flex items-center"
-  >
-    <FontAwesomeIcon icon={faNotesMedical} className="mr-1" />
-    View Notes
-  </button>
-)}
-
-
-            {/* Patient Actions - Pay Fee */}
-            {needsPayment() && (
-              <button
-                onClick={() => setShowPaymentModal(true)}
-                className="px-3 py-1 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 transition text-sm flex items-center"
-              >
-                <FontAwesomeIcon icon={faMoneyBillWave} className="mr-1" />
-                Pay Fee
-              </button>
-            )}
-
-{/* Chat button for PATIENTS - show for confirmed or completed appointments */}
-{role === 'patient' && (appointment.status === 'confirmed' || appointment.status === 'checked-in' || appointment.status === 'completed') && onChatWithDoctor && (
-  <button
-    onClick={() => onChatWithDoctor(appointment.doctorId, appointment.doctorName)}
-    className="px-3 py-1 bg-green-600 text-white rounded-lg hover:bg-green-700 transition text-sm flex items-center"
-  >
-    <FontAwesomeIcon icon={faComment} className="mr-1" />
-    Chat with Doctor
-  </button>
-)}
-
-
-            {/* Patient Actions - Rate Doctor (after completion) */}
-            {canRate() && (
-              <button
-                onClick={() => setShowRatingModal(true)}
-                className="px-3 py-1 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600 transition text-sm flex items-center"
-              >
-                <FontAwesomeIcon icon={faStar} className="mr-1" />
-                Rate Doctor
-              </button>
-            )}
-
-            {/* View Details (common) */}
-            <button
-              onClick={() => onViewDetails(appointment)}
-              className="px-3 py-1 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition text-sm"
-            >
-              View Details
-            </button>
+            </div>
           </div>
         )}
       </div>
@@ -415,8 +457,28 @@ const handleRatingSuccess = (ratingData) => {
           onSuccess={handleRatingSuccess}
         />
       )}
+
+      <style jsx>{`
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(-10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fadeIn {
+          animation: fadeIn 0.2s ease-out;
+        }
+      `}</style>
     </>
   );
+};
+
+// Helper function for formatting currency
+const formatCurrency = (amount) => {
+  return new Intl.NumberFormat('en-PK', {
+    style: 'currency',
+    currency: 'PKR',
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0
+  }).format(amount);
 };
 
 export default AppointmentCard;

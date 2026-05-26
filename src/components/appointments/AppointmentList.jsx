@@ -1,8 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
 import {
-  faCalendarAlt,
-  faExclamationTriangle
+  faCalendarAlt
 } from '@fortawesome/free-solid-svg-icons';
 import AppointmentCard from './AppointmentCard';
 import SearchBar from '../SearchBar';
@@ -74,10 +73,6 @@ const AppointmentList = ({
         return dateA - dateB;
       } else if (sortBy === 'status') {
         return a.status.localeCompare(b.status);
-      } else if (sortBy === 'priority') {
-        if (a.isEmergency && !b.isEmergency) return -1;
-        if (!a.isEmergency && b.isEmergency) return 1;
-        return 0;
       }
       return 0;
     });
@@ -103,7 +98,6 @@ const AppointmentList = ({
       completed: getStatusCount('completed'),
       rejected: getStatusCount('rejected'),
       cancelled: getStatusCount('cancelled'),
-      emergency: appointments.filter(apt => apt.isEmergency).length,
       paymentPending: getPaymentStatusCount('pending'),
       paymentPaid: getPaymentStatusCount('paid')
     };
@@ -122,12 +116,6 @@ const AppointmentList = ({
       {/* Header */}
       <div className="flex justify-between items-center flex-wrap gap-3">
         <h2 className="text-2xl font-bold text-gray-900 dark:text-white">{title}</h2>
-        {stats.emergency > 0 && (
-          <div className="px-3 py-1 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 rounded-full text-sm font-semibold animate-pulse">
-            <FontAwesomeIcon icon={faExclamationTriangle} className="mr-1" />
-            {stats.emergency} Emergency {stats.emergency === 1 ? 'Case' : 'Cases'}
-          </div>
-        )}
         {stats.paymentPending > 0 && role === 'receptionist' && (
           <div className="px-3 py-1 bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 rounded-full text-sm font-semibold">
             {stats.paymentPending} Payment{stats.paymentPending !== 1 ? 's' : ''} Pending
@@ -245,7 +233,6 @@ const AppointmentList = ({
           >
             <option value="date">Sort by Date</option>
             <option value="status">Sort by Status</option>
-            <option value="priority">Sort by Priority</option>
           </select>
         </div>
       )}

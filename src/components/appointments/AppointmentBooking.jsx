@@ -10,7 +10,10 @@ import {
   faExclamationTriangle,
   faStar,
   faGraduationCap,
-  faHourglassHalf
+  faHourglassHalf,
+  faChevronRight,
+  faCheckCircle,
+  faInfoCircle
 } from '@fortawesome/free-solid-svg-icons';
 import { 
   getUsersByRole,
@@ -19,7 +22,6 @@ import {
   createAppointment,
   getDoctorSchedule
 } from '../../database';
-import { validateAppointment } from '../../utils/validators';
 import { formatCurrency } from '../../utils/helpers';
 import toast from 'react-hot-toast';
 
@@ -42,13 +44,13 @@ const AppointmentBooking = ({
   const [doctorsLoaded, setDoctorsLoaded] = useState(false);
   const [departmentsLoaded, setDepartmentsLoaded] = useState(false);
   const [isTodaySelected, setIsTodaySelected] = useState(false);
+  const [currentStep, setCurrentStep] = useState(1);
   const [formData, setFormData] = useState({
     departmentId: '',
     doctorId: '',
     date: '',
     time: '',
-    reason: '',
-    isEmergency: false
+    reason: ''
   });
   const [errors, setErrors] = useState({});
   
@@ -149,6 +151,7 @@ const AppointmentBooking = ({
           doctorId: doctor.id,
           departmentId: dept?.id || initialDepartmentId || ''
         }));
+        setCurrentStep(2);
       } else if (initialDepartmentId) {
         setFormData(prev => ({
           ...prev,
@@ -265,28 +268,35 @@ const AppointmentBooking = ({
     setErrors(prev => ({ ...prev, time: null }));
   };
 
+  const handleNextStep = () => {
+    if (currentStep === 1 && !formData.departmentId) {
+      toast.error('Please select a department');
+      return;
+    }
+    if (currentStep === 2 && !formData.doctorId) {
+      toast.error('Please select a doctor');
+      return;
+    }
+    if (currentStep === 3 && !formData.date) {
+      toast.error('Please select a date');
+      return;
+    }
+    if (currentStep === 3 && !formData.time) {
+      toast.error('Please select a time slot');
+      return;
+    }
+    setCurrentStep(prev => Math.min(prev + 1, 4));
+  };
+
+  const handlePrevStep = () => {
+    setCurrentStep(prev => Math.max(prev - 1, 1));
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     
-    const validationData = {
-      department: formData.departmentId,
-      doctorId: formData.doctorId,
-      date: formData.date,
-      time: formData.time,
-      reason: formData.reason
-    };
-
-    const validation = validateAppointment(validationData);
-    if (!validation.isValid) {
-      setErrors({
-        departmentId: validation.errors.department,
-        doctorId: validation.errors.doctorId,
-        date: validation.errors.date,
-        time: validation.errors.time,
-        reason: validation.errors.reason
-      });
-      const firstError = Object.values(validation.errors)[0];
-      if (firstError) toast.error(firstError);
+    if (!formData.reason.trim()) {
+      toast.error('Please provide a reason for the visit');
       return;
     }
 
@@ -313,11 +323,8 @@ const AppointmentBooking = ({
         department: formData.departmentId,
         date: formData.date,
         time: formData.time,
-        reason: formData.reason,
-        isEmergency: formData.isEmergency || false
+        reason: formData.reason
       };
-
-      console.log('Sending appointment data:', appointmentData);
 
       const result = await createAppointment(appointmentData);
 
@@ -349,7 +356,6 @@ const AppointmentBooking = ({
     const today = new Date();
     return today.toISOString().split('T')[0];
   };
-
 
   const getMaxDate = () => {
     const max = new Date();
@@ -395,287 +401,445 @@ const AppointmentBooking = ({
   // Show loading until initial data is loaded
   if (!doctorsLoaded || !departmentsLoaded) {
     return (
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 flex justify-center">
+      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-8 flex justify-center">
         <div className="text-center">
-          <FontAwesomeIcon icon={faSpinner} className="animate-spin text-blue-600 text-3xl mb-3" />
-          <p className="text-gray-600 dark:text-gray-400">Loading...</p>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
+          <p className="text-gray-600 dark:text-gray-400">Loading available doctors...</p>
         </div>
       </div>
     );
   }
 
+  const selectedDoctor = doctors.find(d => d.id === formData.doctorId);
+
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
-      <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-6">
-        Book Appointment
-      </h2>
-
-      <form onSubmit={handleSubmit} className="space-y-6">
-        {/* Emergency Toggle */}
-        <div className="flex items-center space-x-3 p-4 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 dark:border-red-800">
-          <input
-            type="checkbox"
-            id="isEmergency"
-            name="isEmergency"
-            checked={formData.isEmergency}
-            onChange={handleChange}
-            className="h-4 w-4 text-red-600 focus:ring-red-500 border-gray-300 rounded"
-          />
-          <label htmlFor="isEmergency" className="text-sm font-medium text-red-800 dark:text-red-200">
-            This is an emergency case
-          </label>
-          {formData.isEmergency && (
-            <span className="ml-auto text-xs text-red-600 dark:text-red-400 animate-pulse">
-              🔴 Priority Booking
-            </span>
-          )}
-        </div>
-
-        {/* Department Selection */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-            <FontAwesomeIcon icon={faBuilding} className="mr-2" />
-            Department *
-          </label>
-          <select
-            name="departmentId"
-            value={formData.departmentId}
-            onChange={handleChange}
-            className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white ${
-               errors.departmentId ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
-            }`}
-          >
-            <option value="">Select Department</option>
-            {departments.map(dept => (
-              <option key={dept.id} value={dept.id}>{dept.name}</option>
-            ))}
-          </select>
-          {errors.departmentId && (
-            <p className="mt-1 text-sm text-red-600">{errors.departmentId}</p>
-          )}
-        </div>
-
-        {/* Doctor Selection */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-            <FontAwesomeIcon icon={faUserMd} className="mr-2" />
-            Doctor *
-          </label>
-          <select
-            name="doctorId"
-            value={formData.doctorId}
-            onChange={handleChange}
-            disabled={!formData.departmentId || loading}
-            className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white ${
-              errors.doctorId ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
-            } ${!formData.departmentId ? 'bg-gray-100 dark:bg-gray-600' : ''}`}
-          >
-            <option value="">Select Doctor</option>
-            {filteredDoctors.map(doc => (
-              <option key={doc.id} value={doc.id}>
-                Dr. {doc.fullName} - {doc.specialization}
-              </option>
-            ))}
-          </select>
-          {errors.doctorId && (
-            <p className="mt-1 text-sm text-red-600">{errors.doctorId}</p>
-          )}
-        </div>
-
-        {/* Doctor Details (when selected) */}
-        {formData.doctorId && (
-          <div className="bg-blue-50 dark:bg-blue-900/20 p-4 rounded-lg border border-blue-200 dark:border-blue-800">
-            <div className="flex justify-between items-start">
-              <div>
-                <h3 className="font-medium text-gray-900 dark:text-white">
-                  {doctors.find(d => d.id === formData.doctorId)?.fullName}
-                </h3>
-                <p className="text-sm text-gray-600 dark:text-gray-400">
-                  {doctors.find(d => d.id === formData.doctorId)?.specialization}
-                </p>
-                <div className="flex items-center mt-1">
-                  <div className="flex mr-2">
-                    {renderRating(doctors.find(d => d.id === formData.doctorId)?.avgRating || 0)}
-                  </div>
-                  <span className="text-xs text-gray-500">
-                    ({doctors.find(d => d.id === formData.doctorId)?.ratings || 0} reviews)
-                  </span>
-                </div>
-                <p className="text-xs text-gray-500 mt-1">
-                  <FontAwesomeIcon icon={faGraduationCap} className="mr-1" />
-                  {doctors.find(d => d.id === formData.doctorId)?.experience || 0}+ years exp.
-                </p>
+    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-lg overflow-hidden">
+      {/* Header with Progress Steps */}
+      <div className="bg-gradient-to-r from-blue-600 to-indigo-600 px-6 py-4">
+        <h2 className="text-xl font-bold text-white">Book an Appointment</h2>
+        <p className="text-blue-100 text-sm mt-1">Schedule your consultation with our specialist doctors</p>
+        
+        {/* Progress Steps */}
+        <div className="flex items-center justify-between mt-6">
+          {[
+            { step: 1, label: 'Department', icon: faBuilding },
+            { step: 2, label: 'Doctor', icon: faUserMd },
+            { step: 3, label: 'Date & Time', icon: faCalendarAlt },
+            { step: 4, label: 'Reason', icon: faStethoscope }
+          ].map((item) => (
+            <div key={item.step} className="flex-1 text-center">
+              <div className={`w-8 h-8 mx-auto rounded-full flex items-center justify-center transition-all ${
+                currentStep >= item.step 
+                  ? 'bg-white text-blue-600 shadow-lg' 
+                  : 'bg-blue-400 text-white'
+              }`}>
+                {currentStep > item.step ? (
+                  <FontAwesomeIcon icon={faCheckCircle} className="text-green-500" />
+                ) : (
+                  <FontAwesomeIcon icon={item.icon} className="text-sm" />
+                )}
               </div>
-              <div className="text-right">
-                <p className="text-lg font-bold text-blue-600 dark:text-blue-400">
-                  {formatCurrency(doctors.find(d => d.id === formData.doctorId)?.consultationFee || 0)}
-                </p>
-                <p className="text-xs text-gray-500">Consultation Fee</p>
+              <p className={`text-xs mt-2 hidden sm:block ${
+                currentStep >= item.step ? 'text-white font-medium' : 'text-blue-200'
+              }`}>
+                {item.label}
+              </p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <form onSubmit={handleSubmit} className="p-6">
+        {/* Step 1: Department Selection */}
+        {currentStep === 1 && (
+          <div className="space-y-6 animate-fadeIn">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+                <FontAwesomeIcon icon={faBuilding} className="mr-2 text-blue-500" />
+                Select Department
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {departments.map(dept => (
+                  <button
+                    key={dept.id}
+                    type="button"
+                    onClick={() => {
+                      setFormData(prev => ({ ...prev, departmentId: dept.id }));
+                      setCurrentStep(2);
+                    }}
+                    className={`p-4 rounded-xl border-2 text-left transition-all ${
+                      formData.departmentId === dept.id
+                        ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                        : 'border-gray-200 dark:border-gray-700 hover:border-blue-300 hover:bg-blue-50/50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="font-semibold text-gray-900 dark:text-white">{dept.name}</p>
+                        <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                          {dept.description || 'Medical department'}
+                        </p>
+                      </div>
+                      <FontAwesomeIcon icon={faChevronRight} className="text-gray-400" />
+                    </div>
+                  </button>
+                ))}
               </div>
             </div>
           </div>
         )}
 
-        {/* Date Selection */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-            <FontAwesomeIcon icon={faCalendarAlt} className="mr-2" />
-            Date *
-          </label>
-          <input
-            type="date"
-            name="date"
-            value={formData.date}
-            onChange={handleChange}
-            min={getTodayDate()}
-            max={getMaxDate()}
-            disabled={!formData.doctorId}
-            className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white ${
-              errors.date ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
-            } ${!formData.doctorId ? 'bg-gray-100 dark:bg-gray-600' : ''}`}
-          />
-          {errors.date && (
-            <p className="mt-1 text-sm text-red-600">{errors.date}</p>
-          )}
-          {isTodaySelected && (
-            <p className="mt-1 text-xs text-orange-600 flex items-center">
-              <FontAwesomeIcon icon={faHourglassHalf} className="mr-1" />
-              Current time: {getCurrentTimeDisplay()} - Past time slots are not available
-            </p>
-          )}
-        </div>
-
-        {/* Time Slots */}
-        {formData.date && formData.doctorId && (
-          <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-              <FontAwesomeIcon icon={faClock} className="mr-2" />
-              Available Time Slots *
-            </label>
-            {checkingSlot ? (
-              <div className="flex justify-center py-4">
-                <FontAwesomeIcon icon={faSpinner} className="animate-spin text-blue-600 text-2xl" />
+        {/* Step 2: Doctor Selection */}
+        {currentStep === 2 && (
+          <div className="space-y-6 animate-fadeIn">
+            <div>
+              <div className="flex justify-between items-center mb-3">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                  <FontAwesomeIcon icon={faUserMd} className="mr-2 text-blue-500" />
+                  Select Doctor
+                </label>
+                <button
+                  type="button"
+                  onClick={handlePrevStep}
+                  className="text-sm text-blue-600 hover:text-blue-700"
+                >
+                  ← Change Department
+                </button>
               </div>
-            ) : (
-              <>
-                {isTodaySelected && availableSlots.filter(slot => !isSlotPast(slot.time)).length === 0 && (
-                  <div className="mb-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg">
-                    <p className="text-sm text-yellow-800 dark:text-yellow-200 flex items-center">
-                      <FontAwesomeIcon icon={faExclamationTriangle} className="mr-2" />
-                      No available time slots for the remainder of today. Please select a different date.
-                    </p>
-                  </div>
-                )}
-                <div className="grid grid-cols-3 gap-2">
-                  {availableSlots.map((slot, index) => {
-                    const booked = isSlotBooked(slot.time);
-                    const isPast = isSlotPast(slot.time);
-                    const isSelected = selectedSlot?.time === slot.time;
-                    const isAvailable = slot.available && !booked && !isPast;
-                    
-                    let tooltipText = '';
-                    if (isPast) tooltipText = 'This time has already passed';
-                    else if (booked) tooltipText = 'Already booked';
-                    else if (!slot.available) tooltipText = 'Doctor not available at this time';
-                    
-                    return (
-                      <button
-                        key={index}
-                        type="button"
-                        onClick={() => isAvailable && handleSlotSelect(slot)}
-                        disabled={!isAvailable}
-                        title={tooltipText}
-                        className={`p-2 text-sm rounded-lg border transition ${
-                          !isAvailable
-                            ? 'bg-gray-100 text-gray-400 cursor-not-allowed border-gray-200 dark:bg-gray-700 dark:text-gray-500'
-                            : isSelected
-                              ? 'bg-blue-600 text-white border-blue-600'
-                              : 'hover:bg-blue-50 border-gray-300 dark:border-gray-600 dark:hover:bg-gray-700'
-                        }`}
-                      >
-                        {slot.display}
-                        {isPast && <FontAwesomeIcon icon={faHourglassHalf} className="ml-1 text-xs" />}
-                        {booked && !isPast && <FontAwesomeIcon icon={faExclamationTriangle} className="ml-1 text-xs" />}
-                      </button>
-                    );
-                  })}
+              
+              {filteredDoctors.length === 0 ? (
+                <div className="text-center py-8 bg-gray-50 dark:bg-gray-700 rounded-xl">
+                  <FontAwesomeIcon icon={faUserMd} className="h-12 w-12 text-gray-400 mb-3" />
+                  <p className="text-gray-600 dark:text-gray-400">No doctors available in this department</p>
+                  <button
+                    type="button"
+                    onClick={() => setCurrentStep(1)}
+                    className="mt-3 text-blue-600 hover:text-blue-700 text-sm"
+                  >
+                    ← Select another department
+                  </button>
                 </div>
-                {availableSlots.length === 0 && !checkingSlot && (
-                  <p className="text-center text-gray-500 dark:text-gray-400 py-4">
-                    No available slots for this date
-                  </p>
-                )}
-              </>
-            )}
-            {errors.time && (
-              <p className="mt-1 text-sm text-red-600">{errors.time}</p>
-            )}
+              ) : (
+                <div className="grid grid-cols-1 gap-3">
+                  {filteredDoctors.map(doc => (
+                    <button
+                      key={doc.id}
+                      type="button"
+                      onClick={() => {
+                        setFormData(prev => ({ ...prev, doctorId: doc.id }));
+                        setCurrentStep(3);
+                      }}
+                      className={`p-4 rounded-xl border-2 transition-all ${
+                        formData.doctorId === doc.id
+                          ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20'
+                          : 'border-gray-200 dark:border-gray-700 hover:border-blue-300'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="font-semibold text-gray-900 dark:text-white">Dr. {doc.fullName}</p>
+                            <span className="text-xs bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300 px-2 py-0.5 rounded-full">
+                              {doc.specialization}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3 mt-2 text-sm text-gray-600 dark:text-gray-400">
+                            <span className="flex items-center">
+                              <FontAwesomeIcon icon={faGraduationCap} className="mr-1 text-xs" />
+                              {doc.experience || 0}+ yrs
+                            </span>
+                            <div className="flex items-center">
+                              {renderRating(doc.avgRating || 0)}
+                              <span className="ml-1 text-xs">({doc.ratings || 0})</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-lg font-bold text-blue-600 dark:text-blue-400">
+                            {formatCurrency(doc.consultationFee || 1000)}
+                          </p>
+                          <p className="text-xs text-gray-500">Consultation Fee</p>
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
-        {/* Reason for Visit */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-            <FontAwesomeIcon icon={faStethoscope} className="mr-2" />
-            Reason for Visit *
-          </label>
-          <textarea
-            name="reason"
-            value={formData.reason}
-            onChange={handleChange}
-            rows="3"
-            className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white ${
-              errors.reason ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
-            }`}
-            placeholder="Describe your symptoms or reason for appointment..."
-          />
-          {errors.reason && (
-            <p className="mt-1 text-sm text-red-600">{errors.reason}</p>
-          )}
-        </div>
+        {/* Step 3: Date & Time Selection */}
+        {currentStep === 3 && selectedDoctor && (
+          <div className="space-y-6 animate-fadeIn">
+            <div>
+              <div className="flex justify-between items-center mb-3">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                  <FontAwesomeIcon icon={faCalendarAlt} className="mr-2 text-blue-500" />
+                  Select Date & Time
+                </label>
+                <button
+                  type="button"
+                  onClick={handlePrevStep}
+                  className="text-sm text-blue-600 hover:text-blue-700"
+                >
+                  ← Change Doctor
+                </button>
+              </div>
+
+              {/* Doctor Info Card */}
+              <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-gray-700 dark:to-gray-800 p-4 rounded-xl mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 bg-blue-500 rounded-full flex items-center justify-center text-white font-bold text-lg">
+                    {selectedDoctor.fullName?.charAt(0)}
+                  </div>
+                  <div>
+                    <p className="font-semibold text-gray-900 dark:text-white">Dr. {selectedDoctor.fullName}</p>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">{selectedDoctor.specialization}</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Date Picker */}
+              <div className="mb-6">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  <FontAwesomeIcon icon={faCalendarAlt} className="mr-2" />
+                  Appointment Date
+                </label>
+                <input
+                  type="date"
+                  name="date"
+                  value={formData.date}
+                  onChange={handleChange}
+                  min={getTodayDate()}
+                  max={getMaxDate()}
+                  className={`w-full px-4 py-3 border rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white ${
+                    errors.date ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
+                  }`}
+                />
+                {isTodaySelected && (
+                  <p className="mt-2 text-xs text-orange-600 flex items-center">
+                    <FontAwesomeIcon icon={faHourglassHalf} className="mr-1" />
+                    Current time: {getCurrentTimeDisplay()} - Past slots are not available
+                  </p>
+                )}
+              </div>
+
+              {/* Time Slots */}
+              {formData.date && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-3">
+                    <FontAwesomeIcon icon={faClock} className="mr-2" />
+                    Available Time Slots
+                  </label>
+                  {checkingSlot ? (
+                    <div className="flex justify-center py-8">
+                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                    </div>
+                  ) : (
+                    <>
+                      {isTodaySelected && availableSlots.filter(slot => !isSlotPast(slot.time)).length === 0 && (
+                        <div className="mb-4 p-3 bg-yellow-50 dark:bg-yellow-900/20 rounded-lg">
+                          <p className="text-sm text-yellow-800 dark:text-yellow-200 flex items-center">
+                            <FontAwesomeIcon icon={faExclamationTriangle} className="mr-2" />
+                            No available time slots for today. Please select another date.
+                          </p>
+                        </div>
+                      )}
+                      <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                        {availableSlots.map((slot, index) => {
+                          const booked = isSlotBooked(slot.time);
+                          const isPast = isSlotPast(slot.time);
+                          const isSelected = selectedSlot?.time === slot.time;
+                          const isAvailable = slot.available && !booked && !isPast;
+                          
+                          let tooltipText = '';
+                          if (isPast) tooltipText = 'This time has already passed';
+                          else if (booked) tooltipText = 'Already booked';
+                          else if (!slot.available) tooltipText = 'Doctor not available at this time';
+                          
+                          return (
+                            <button
+                              key={index}
+                              type="button"
+                              onClick={() => isAvailable && handleSlotSelect(slot)}
+                              disabled={!isAvailable}
+                              title={tooltipText}
+                              className={`py-2 px-3 text-sm rounded-lg border transition-all ${
+                                !isAvailable
+                                  ? 'bg-gray-100 text-gray-400 cursor-not-allowed border-gray-200 dark:bg-gray-700 dark:text-gray-500'
+                                  : isSelected
+                                    ? 'bg-blue-600 text-white border-blue-600 shadow-md transform scale-105'
+                                    : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:border-blue-400 hover:shadow-md'
+                              }`}
+                            >
+                              {slot.display}
+                              {isPast && <FontAwesomeIcon icon={faHourglassHalf} className="ml-1 text-xs" />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {availableSlots.filter(s => s.available && !isSlotBooked(s.time) && !isSlotPast(s.time)).length === 0 && !checkingSlot && (
+                        <p className="text-center text-gray-500 dark:text-gray-400 py-6">
+                          No available slots for this date. Please select another date.
+                        </p>
+                      )}
+                    </>
+                  )}
+                  {errors.time && (
+                    <p className="mt-2 text-sm text-red-600">{errors.time}</p>
+                  )}
+                </div>
+              )}
+
+              {formData.time && (
+                <div className="mt-4 p-3 bg-green-50 dark:bg-green-900/20 rounded-lg flex items-center gap-2">
+                  <FontAwesomeIcon icon={faCheckCircle} className="text-green-600" />
+                  <p className="text-sm text-green-700 dark:text-green-300">
+                    Selected: {formData.date} at {formData.time}
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Step 4: Reason for Visit */}
+        {currentStep === 4 && (
+          <div className="space-y-6 animate-fadeIn">
+            <div>
+              <div className="flex justify-between items-center mb-3">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                  <FontAwesomeIcon icon={faStethoscope} className="mr-2 text-blue-500" />
+                  Reason for Visit
+                </label>
+                <button
+                  type="button"
+                  onClick={handlePrevStep}
+                  className="text-sm text-blue-600 hover:text-blue-700"
+                >
+                  ← Change Date/Time
+                </button>
+              </div>
+
+              {/* Appointment Summary */}
+              <div className="bg-gray-50 dark:bg-gray-700 rounded-xl p-4 mb-6">
+                <h4 className="font-medium text-gray-900 dark:text-white mb-3">Appointment Summary</h4>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-400">Doctor:</span>
+                    <span className="font-medium">Dr. {selectedDoctor?.fullName}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-400">Department:</span>
+                    <span>{departments.find(d => d.id === formData.departmentId)?.name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-400">Date & Time:</span>
+                    <span>{formData.date} at {formData.time}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600 dark:text-gray-400">Consultation Fee:</span>
+                    <span className="font-bold text-green-600">{formatCurrency(selectedDoctor?.consultationFee || 1000)}</span>
+                  </div>
+                </div>
+              </div>
+
+              <textarea
+                name="reason"
+                value={formData.reason}
+                onChange={handleChange}
+                rows="5"
+                className={`w-full px-4 py-3 border rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white ${
+                  errors.reason ? 'border-red-500' : 'border-gray-300 dark:border-gray-600'
+                }`}
+                placeholder="Describe your symptoms or reason for appointment in detail..."
+              />
+              {errors.reason && (
+                <p className="mt-2 text-sm text-red-600">{errors.reason}</p>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Action Buttons */}
-        <div className="flex justify-end space-x-3 pt-4">
+        <div className="flex justify-between gap-3 pt-6 mt-4 border-t border-gray-200 dark:border-gray-700">
+          {currentStep > 1 && currentStep <= 4 && (
+            <button
+              type="button"
+              onClick={handlePrevStep}
+              className="px-6 py-2.5 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-700 transition font-medium"
+            >
+              Back
+            </button>
+          )}
+          
+          {currentStep < 4 ? (
+            <button
+              type="button"
+              onClick={handleNextStep}
+              className="ml-auto px-6 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition font-medium flex items-center gap-2"
+            >
+              Continue
+              <FontAwesomeIcon icon={faChevronRight} />
+            </button>
+          ) : (
+            <button
+              type="submit"
+              disabled={loading || !formData.reason.trim()}
+              className="ml-auto px-8 py-2.5 bg-green-600 text-white rounded-xl hover:bg-green-700 transition disabled:opacity-50 font-medium flex items-center gap-2"
+            >
+              {loading ? (
+                <>
+                  <FontAwesomeIcon icon={faSpinner} className="animate-spin" />
+                  Booking...
+                </>
+              ) : (
+                <>
+                  Confirm Appointment
+                  <FontAwesomeIcon icon={faCheckCircle} />
+                </>
+              )}
+            </button>
+          )}
+          
           {onCancel && (
             <button
               type="button"
               onClick={onCancel}
-              className="px-4 py-2 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition"
+              className="px-6 py-2.5 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition"
             >
               Cancel
             </button>
           )}
-          <button
-            type="submit"
-            disabled={loading}
-            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:opacity-50 flex items-center"
-          >
-            {loading ? (
-              <>
-                <FontAwesomeIcon icon={faSpinner} className="animate-spin mr-2" />
-                Booking...
-              </>
-            ) : (
-              'Book Appointment'
-            )}
-          </button>
         </div>
 
         {/* Info Message */}
-        <div className="bg-yellow-50 dark:bg-yellow-900/20 p-3 rounded-lg">
-          <p className="text-xs text-yellow-800 dark:text-yellow-200 text-center">
-            <FontAwesomeIcon icon={faExclamationTriangle} className="mr-1" />
-            Your appointment request will be sent for approval. You'll be notified once confirmed.
-            Payment is required after approval to confirm the appointment.
-            {isTodaySelected && (
-              <span className="block mt-1 text-orange-600 dark:text-orange-400">
-                ⏰ Time slots that have already passed today are not shown.
-              </span>
-            )}
-          </p>
+        <div className="mt-6 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+          <div className="flex items-start gap-2">
+            <FontAwesomeIcon icon={faInfoCircle} className="text-blue-600 dark:text-blue-400 mt-0.5" />
+            <p className="text-xs text-blue-800 dark:text-blue-200">
+              Your appointment request will be sent for approval. You'll be notified once confirmed.
+              Payment is required after approval to confirm the appointment.
+              {isTodaySelected && (
+                <span className="block mt-1 text-orange-600 dark:text-orange-400">
+                  ⏰ Time slots that have already passed today are not selectable.
+                </span>
+              )}
+            </p>
+          </div>
         </div>
       </form>
-      
+
+      <style jsx>{`
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fadeIn {
+          animation: fadeIn 0.3s ease-out;
+        }
+      `}</style>
     </div>
   );
 };

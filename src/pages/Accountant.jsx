@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../hooks/useAuth';
 import { useNavigate } from 'react-router-dom';
 import { FontAwesomeIcon } from '@fortawesome/react-fontawesome';
+import { db } from '../firebase';
+import { doc, getDoc, updateDoc, increment, collection, addDoc, serverTimestamp, query, where, getDocs, orderBy } from 'firebase/firestore';
 import {
   faDollarSign,
   faChartLine,
@@ -49,7 +51,6 @@ import {
   getPurchaseOrdersByStatus,
   updatePurchaseOrderStatus,
   getMonthlyRevenueTrend,
-  getExpensesByCategory,
   addExpense,
   
   // Department
@@ -227,16 +228,66 @@ const [pricingConfig, setPricingConfig] = useState(null);
 
 const fetchAccountBalance = useCallback(async () => {
   try {
-    const { db } = await import('../firebase');
-    const { doc, getDoc } = await import('firebase/firestore');
-    
     const accountRef = doc(db, 'accounts', 'main');
     const accountSnap = await getDoc(accountRef);
     
     if (accountSnap.exists()) {
       const data = accountSnap.data();
       setAccountBalance(data.balance || 0);
+      
+      // Also update stats with proper revenue/expense calculation
+      const startDate = new Date();
+      startDate.setDate(1);
+      startDate.setHours(0, 0, 0, 0);
+      const endDate = new Date();
+      endDate.setMonth(endDate.getMonth() + 1);
+      endDate.setDate(0);
+      endDate.setHours(23, 59, 59, 999);
+      
+      // Calculate monthly revenue
+      const appointmentsQuery = query(
+        collection(db, 'appointments'),
+        where('paymentStatus', 'in', ['paid', 'confirmed']),
+        where('paidAt', '>=', startDate),
+        where('paidAt', '<=', endDate)
+      );
+      const appointmentsSnap = await getDocs(appointmentsQuery);
+      let monthlyRevenue = 0;
+      for (const aptDoc of appointmentsSnap.docs) {
+        const apt = aptDoc.data();
+        const amount = apt.paymentAmount || apt.consultationFee || apt.amount || 0;
+        monthlyRevenue += typeof amount === 'number' ? amount : parseFloat(amount) || 0;
+      }
+      
+      // Calculate monthly expenses
+      const expensesQuery = query(
+        collection(db, 'expenses'),
+        where('createdAt', '>=', startDate),
+        where('createdAt', '<=', endDate)
+      );
+      const expensesSnap = await getDocs(expensesQuery);
+      let monthlyExpenses = 0;
+      for (const expDoc of expensesSnap.docs) {
+        monthlyExpenses += expDoc.data().amount || 0;
+      }
+      
+      const monthlyProfit = monthlyRevenue - monthlyExpenses;
+      
+      setStats(prev => ({
+        ...prev,
+        totalRevenue: monthlyRevenue,
+        totalExpenses: monthlyExpenses,
+        totalProfit: monthlyProfit,
+        profitMargin: monthlyRevenue > 0 ? (monthlyProfit / monthlyRevenue) * 100 : 0
+      }));
+      
     } else {
+      // Initialize account if it doesn't exist
+      await updateDoc(doc(db, 'accounts', 'main'), {
+        balance: 0,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
       setAccountBalance(0);
     }
   } catch (error) {
@@ -244,17 +295,12 @@ const fetchAccountBalance = useCallback(async () => {
   }
 }, []);
 
-// ADD THIS FUNCTION HERE ↓
 const syncProfitToAccountBalance = useCallback(async () => {
   try {
-    const { db } = await import('../firebase');
-    const { doc, getDoc, updateDoc, increment, collection, addDoc, serverTimestamp, query, where, getDocs } = await import('firebase/firestore');
-    
     const accountRef = doc(db, 'accounts', 'main');
     const accountSnap = await getDoc(accountRef);
     
     if (!accountSnap.exists()) {
-      // Initialize account if it doesn't exist
       await updateDoc(accountRef, {
         balance: 0,
         createdAt: serverTimestamp(),
@@ -262,7 +308,7 @@ const syncProfitToAccountBalance = useCallback(async () => {
       });
     }
     
-    // Get current period revenue and expenses
+    // Get current period (this month)
     const startOfMonth = new Date();
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
@@ -283,11 +329,11 @@ const syncProfitToAccountBalance = useCallback(async () => {
     let monthlyRevenue = 0;
     for (const aptDoc of appointmentsSnap.docs) {
       const apt = aptDoc.data();
-      const amount = apt.paymentAmount || apt.consultationFee || 0;
+      const amount = apt.paymentAmount || apt.consultationFee || apt.amount || 0;
       monthlyRevenue += typeof amount === 'number' ? amount : parseFloat(amount) || 0;
     }
     
-    // Calculate total expenses this month
+    // Calculate total expenses this month (including salaries, operational expenses, purchases)
     const expensesQuery = query(
       collection(db, 'expenses'),
       where('createdAt', '>=', startOfMonth),
@@ -296,8 +342,7 @@ const syncProfitToAccountBalance = useCallback(async () => {
     const expensesSnap = await getDocs(expensesQuery);
     let monthlyExpenses = 0;
     for (const expDoc of expensesSnap.docs) {
-      const exp = expDoc.data();
-      monthlyExpenses += exp.amount || 0;
+      monthlyExpenses += expDoc.data().amount || 0;
     }
     
     // Get salary expenses
@@ -313,6 +358,19 @@ const syncProfitToAccountBalance = useCallback(async () => {
       monthlyExpenses += sal.calculatedSalary || 0;
     }
     
+    // Get purchase order expenses (delivered this month)
+    const purchaseOrdersQuery = query(
+      collection(db, 'purchaseOrders'),
+      where('status', '==', 'delivered'),
+      where('deliveredAt', '>=', startOfMonth),
+      where('deliveredAt', '<=', endOfMonth)
+    );
+    const purchaseOrdersSnap = await getDocs(purchaseOrdersQuery);
+    for (const poDoc of purchaseOrdersSnap.docs) {
+      const po = poDoc.data();
+      monthlyExpenses += po.total || 0;
+    }
+    
     const monthlyProfit = monthlyRevenue - monthlyExpenses;
     
     // Get last synced profit
@@ -322,12 +380,17 @@ const syncProfitToAccountBalance = useCallback(async () => {
     
     if (lastSyncSnap.exists()) {
       lastSyncedProfit = lastSyncSnap.data().profitAmount || 0;
+    } else {
+      await updateDoc(lastSyncRef, {
+        profitAmount: 0,
+        lastSyncedAt: serverTimestamp()
+      });
     }
     
     // Calculate new profit to add (only the difference)
     const profitDifference = monthlyProfit - lastSyncedProfit;
     
-    if (Math.abs(profitDifference) > 0) {
+    if (Math.abs(profitDifference) > 0.01) { // Only sync if difference is significant
       // Update account balance with the profit difference
       await updateDoc(accountRef, {
         balance: increment(profitDifference),
@@ -348,6 +411,8 @@ const syncProfitToAccountBalance = useCallback(async () => {
         revenue: monthlyRevenue,
         expenses: monthlyExpenses,
         profit: monthlyProfit,
+        previousBalance: accountSnap.exists() ? accountSnap.data().balance || 0 : 0,
+        newBalance: (accountSnap.exists() ? accountSnap.data().balance || 0 : 0) + profitDifference,
         createdAt: serverTimestamp(),
         createdBy: currentUser?.uid
       });
@@ -362,6 +427,15 @@ const syncProfitToAccountBalance = useCallback(async () => {
       
       console.log(`Profit synced: ${formatCurrency(profitDifference)} added to account`);
       
+      // Update stats
+      setStats(prev => ({
+        ...prev,
+        totalRevenue: monthlyRevenue,
+        totalExpenses: monthlyExpenses,
+        totalProfit: monthlyProfit,
+        profitMargin: monthlyRevenue > 0 ? (monthlyProfit / monthlyRevenue) * 100 : 0
+      }));
+      
       // Refresh account balance
       await fetchAccountBalance();
     }
@@ -370,9 +444,7 @@ const syncProfitToAccountBalance = useCallback(async () => {
     console.error('Error syncing profit to account:', error);
   }
 }, [currentUser, fetchAccountBalance]);
-// ADD ABOVE THIS LINE ↑
 
-// Add this function in Accountant.jsx:
 const handleRechargeAccount = async () => {
   const amount = parseFloat(rechargeData.amount);
   
@@ -383,43 +455,39 @@ const handleRechargeAccount = async () => {
   
   setFormSubmitting(true);
   try {
-    const { db } = await import('../firebase');
-    const { doc, updateDoc, increment, addDoc, collection, serverTimestamp } = await import('firebase/firestore');
+    // Update account balance (add amount)
+    const success = await updateAccountBalance(amount, `Account Recharge - ${rechargeData.method}`, 'revenue', rechargeData.reference);
     
-    // Update account balance
-    const accountRef = doc(db, 'accounts', 'main');
-    await updateDoc(accountRef, {
-      balance: increment(amount),
-      lastUpdated: serverTimestamp()
-    });
-    
-    // Record transaction
-    await addDoc(collection(db, 'accountTransactions'), {
-      type: 'credit',
-      amount: amount,
-      method: rechargeData.method,
-      reference: rechargeData.reference,
-      notes: rechargeData.notes,
-      createdAt: serverTimestamp(),
-      createdBy: currentUser?.uid,
-      description: 'Account Recharge'
-    });
-    
-    // Create audit log
-    await addDoc(collection(db, 'auditLogs'), {
-      action: 'ACCOUNT_RECHARGED',
-      userId: currentUser?.uid,
-      amount: amount,
-      method: rechargeData.method,
-      timestamp: new Date(),
-      details: { reference: rechargeData.reference }
-    });
-    
-    toast.success(`Account recharged with ${formatCurrency(amount)}`);
-    setShowRechargeModal(false);
-    setRechargeData({ amount: '', method: 'bank_transfer', reference: '', notes: '' });
-    await fetchAccountBalance();
-    await refreshAllData();
+    if (success) {
+      // Record detailed transaction
+      const { addDoc, collection, serverTimestamp } = await import('firebase/firestore');
+      await addDoc(collection(db, 'accountRecharges'), {
+        amount: amount,
+        method: rechargeData.method,
+        reference: rechargeData.reference,
+        notes: rechargeData.notes,
+        createdAt: serverTimestamp(),
+        createdBy: currentUser?.uid
+      });
+      
+      // Create audit log
+      await addDoc(collection(db, 'auditLogs'), {
+        action: 'ACCOUNT_RECHARGED',
+        userId: currentUser?.uid,
+        amount: amount,
+        method: rechargeData.method,
+        timestamp: serverTimestamp(),
+        details: { reference: rechargeData.reference }
+      });
+      
+      toast.success(`Account recharged with ${formatCurrency(amount)}`);
+      setShowRechargeModal(false);
+      setRechargeData({ amount: '', method: 'bank_transfer', reference: '', notes: '' });
+      await fetchAccountBalance();
+      await refreshAllData();
+    } else {
+      toast.error('Failed to recharge account');
+    }
     
   } catch (error) {
     console.error('Error recharging account:', error);
@@ -513,41 +581,35 @@ const fetchPricingConfig = useCallback(async () => {
     }
   }, []);
 
-// Replace the existing fetchFinancialData function with this corrected version:
-
 const fetchFinancialData = useCallback(async () => {
   try {
-    const { db } = await import('../firebase');
-    const { collection, query, where, getDocs, orderBy, doc, getDoc } = await import('firebase/firestore');
-    
     // Get account balance
     const accountRef = doc(db, 'accounts', 'main');
     const accountSnap = await getDoc(accountRef);
     let currentBalance = 0;
-    let totalRevenue = 0;
-    let totalExpenses = 0;
     
     if (accountSnap.exists()) {
       currentBalance = accountSnap.data().balance || 0;
       setAccountBalance(currentBalance);
     }
     
-    // Get all paid appointments for revenue
+    // Calculate revenue from appointments for the selected date range
+    let totalRevenue = 0;
     const appointmentsQuery = query(
       collection(db, 'appointments'),
       where('paymentStatus', 'in', ['paid', 'confirmed']),
+      where('paidAt', '>=', dateRange.start),
+      where('paidAt', '<=', dateRange.end),
       orderBy('paidAt', 'desc')
     );
     
     const appointmentsSnapshot = await getDocs(appointmentsQuery);
     const transactionsList = [];
     
-    console.log('Found appointments:', appointmentsSnapshot.docs.length); // Debug log
-    
     for (const aptDoc of appointmentsSnapshot.docs) {
       const apt = { id: aptDoc.id, ...aptDoc.data() };
       
-      // IMPORTANT FIX: Extract amount correctly
+      // Extract amount correctly
       let amount = 0;
       if (apt.paymentAmount && typeof apt.paymentAmount === 'number') {
         amount = apt.paymentAmount;
@@ -556,13 +618,10 @@ const fetchFinancialData = useCallback(async () => {
       } else if (apt.amount && typeof apt.amount === 'number') {
         amount = apt.amount;
       } else {
-        // Try to parse as number if it's a string
         const possibleAmount = apt.paymentAmount || apt.consultationFee || apt.amount || 0;
         amount = typeof possibleAmount === 'string' ? parseFloat(possibleAmount) : possibleAmount;
         if (isNaN(amount)) amount = 0;
       }
-      
-      console.log(`Appointment ${apt.id}: amount = ${amount}`); // Debug log
       
       totalRevenue += amount;
       
@@ -606,8 +665,8 @@ const fetchFinancialData = useCallback(async () => {
         time: apt.time,
         serviceName: apt.serviceName || 'Consultation',
         challanNo: `APT-${apt.id.slice(-8)}`,
-        taxRate: 0.17,
-        notes: apt.notes || ''
+        notes: apt.notes || '',
+        type: 'revenue'
       });
     }
     
@@ -618,64 +677,93 @@ const fetchFinancialData = useCallback(async () => {
       return dateB - dateA;
     });
     
-    console.log('Total Revenue calculated:', totalRevenue); // Debug log
-    console.log('Transactions count:', transactionsList.length); // Debug log
-    
     setTransactions(transactionsList);
     
-    // Get regular expenses
-    const expensesResult = await getExpensesByCategory(dateRange.start, dateRange.end);
-    if (expensesResult.success && expensesResult.data) {
-      setExpenses(expensesResult.data.expenses || []);
-      setExpensesByCategory(expensesResult.data.byCategory || {});
-      totalExpenses += expensesResult.data.totalExpenses || 0;
+    // Calculate expenses
+    let totalExpenses = 0;
+    
+    // Regular expenses
+    const expensesQuery = query(
+      collection(db, 'expenses'),
+      where('createdAt', '>=', dateRange.start),
+      where('createdAt', '<=', dateRange.end)
+    );
+    const expensesSnap = await getDocs(expensesQuery);
+    const expensesList = [];
+    const expensesByCat = {};
+    
+    for (const expDoc of expensesSnap.docs) {
+      const exp = { id: expDoc.id, ...expDoc.data() };
+      const amount = exp.amount || 0;
+      totalExpenses += amount;
+      
+      const category = exp.category || 'other';
+      expensesByCat[category] = (expensesByCat[category] || 0) + amount;
+      
+      expensesList.push({
+        id: exp.id,
+        category: category,
+        amount: amount,
+        description: exp.description,
+        departmentId: exp.departmentId,
+        paymentMethod: exp.paymentMethod,
+        createdAt: exp.createdAt?.toDate?.() || exp.date,
+        type: 'expense'
+      });
     }
     
-    // Get salary expenses for the period
-    const salaryRecordsResult = await getSalaryRecords({
-      startDate: dateRange.start,
-      endDate: dateRange.end
-    });
+    setExpenses(expensesList);
+    setExpensesByCategory(expensesByCat);
+    
+    // Salary expenses
+    const salaryRecordsQuery = query(
+      collection(db, 'salaryRecords'),
+      where('status', '==', 'paid'),
+      where('paidAt', '>=', dateRange.start),
+      where('paidAt', '<=', dateRange.end)
+    );
+    const salarySnap = await getDocs(salaryRecordsQuery);
     let salaryExpenses = 0;
-    if (salaryRecordsResult.success && salaryRecordsResult.data) {
-      salaryExpenses = salaryRecordsResult.data
-        .filter(r => r.status === 'paid')
-        .reduce((sum, r) => sum + (r.calculatedSalary || 0), 0);
-      totalExpenses += salaryExpenses;
+    for (const salDoc of salarySnap.docs) {
+      const sal = salDoc.data();
+      const amount = sal.calculatedSalary || 0;
+      salaryExpenses += amount;
+      totalExpenses += amount;
+      
+      expensesByCat['salaries'] = (expensesByCat['salaries'] || 0) + amount;
     }
     
-    // Get inventory purchase expenses
+    // Purchase order expenses
     const purchaseOrdersQuery = query(
       collection(db, 'purchaseOrders'),
-      where('status', '==', 'delivered')
+      where('status', '==', 'delivered'),
+      where('deliveredAt', '>=', dateRange.start),
+      where('deliveredAt', '<=', dateRange.end)
     );
     const purchaseOrdersSnap = await getDocs(purchaseOrdersQuery);
+    let purchaseExpenses = 0;
     for (const poDoc of purchaseOrdersSnap.docs) {
       const po = poDoc.data();
-      totalExpenses += po.total || 0;
-    }
-    
-    // Get inventory consumption expenses
-    const consumptionResult = await getInventoryConsumption({
-      startDate: dateRange.start,
-      endDate: dateRange.end
-    });
-    if (consumptionResult.success && consumptionResult.data) {
-      totalExpenses += consumptionResult.data.summary?.totalValue || 0;
+      const amount = po.total || 0;
+      // eslint-disable-next-line no-unused-vars
+      purchaseExpenses += amount;
+      totalExpenses += amount;
+      
+      expensesByCat['inventory_purchases'] = (expensesByCat['inventory_purchases'] || 0) + amount;
     }
     
     // Calculate profit
     const profit = totalRevenue - totalExpenses;
     const profitMargin = totalRevenue > 0 ? (profit / totalRevenue) * 100 : 0;
     
-    console.log('Final Stats - Revenue:', totalRevenue, 'Expenses:', totalExpenses, 'Profit:', profit);
-    
     setStats(prev => ({
       ...prev,
       totalRevenue: totalRevenue,
       totalExpenses: totalExpenses,
       totalProfit: profit,
-      profitMargin: profitMargin
+      profitMargin: profitMargin,
+      totalSalaryExpense: salaryExpenses,
+      totalInventoryValue: inventoryData.summary.totalValue || 0
     }));
     
     // Get monthly revenue trend
@@ -688,7 +776,50 @@ const fetchFinancialData = useCallback(async () => {
     console.error('Error fetching financial data:', error);
     toast.error('Failed to load financial data');
   }
-}, [dateRange]);
+}, [dateRange, inventoryData.summary.totalValue]);
+
+const updateAccountBalance = async (amount, description, type = 'expense', reference = null) => {
+  try {
+    const accountRef = doc(db, 'accounts', 'main');
+    const accountSnap = await getDoc(accountRef);
+    
+    let currentBalance = 0;
+    if (accountSnap.exists()) {
+      currentBalance = accountSnap.data().balance || 0;
+    } else {
+      await updateDoc(accountRef, { balance: 0 });
+    }
+    
+    // For expenses (outgoing money), subtract from balance
+    // For revenue (incoming money), add to balance
+    const balanceChange = type === 'expense' ? -amount : amount;
+    
+    await updateDoc(accountRef, {
+      balance: increment(balanceChange),
+      updatedAt: serverTimestamp()
+    });
+    
+    // Record transaction
+    await addDoc(collection(db, 'accountTransactions'), {
+      type: type === 'expense' ? 'debit' : 'credit',
+      amount: amount,
+      description: description,
+      reference: reference,
+      previousBalance: currentBalance,
+      newBalance: currentBalance + balanceChange,
+      createdAt: serverTimestamp(),
+      createdBy: currentUser?.uid
+    });
+    
+    // Update local balance
+    setAccountBalance(prev => prev + balanceChange);
+    
+    return true;
+  } catch (error) {
+    console.error('Error updating account balance:', error);
+    return false;
+  }
+};
 
   const fetchSalaryData = useCallback(async () => {
     try {
@@ -824,29 +955,6 @@ useEffect(() => {
 
   // ==================== EFFECTS ====================
 
-  const initializeAccount = useCallback(async () => {
-  try {
-    const { db } = await import('../firebase');
-    const { doc, getDoc, setDoc } = await import('firebase/firestore');
-    
-    const accountRef = doc(db, 'accounts', 'main');
-    const accountSnap = await getDoc(accountRef);
-    
-    if (!accountSnap.exists()) {
-      await setDoc(accountRef, {
-        balance: 0,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        createdBy: currentUser?.uid
-      });
-    }
-  } catch (error) {
-    console.error('Error initializing account:', error);
-  }
-}, [currentUser]);
-
-// Find the existing useEffect hooks (around line 600-700), then ADD THIS AFTER THEM:
-
 // Initialize financial collections
 const initializeFinancialCollections = useCallback(async () => {
   try {
@@ -893,6 +1001,38 @@ useEffect(() => {
   autoSyncProfit();
 }, [activeTab, syncProfitToAccountBalance]);
 
+const initializeAccount = useCallback(async () => {
+  try {
+    const accountRef = doc(db, 'accounts', 'main');
+    const accountSnap = await getDoc(accountRef);
+    
+    if (!accountSnap.exists()) {
+      await updateDoc(accountRef, {
+        balance: 0,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+        createdBy: currentUser?.uid || 'system'
+      });
+      console.log('Account initialized with balance 0');
+    }
+    
+    // Initialize sync tracker
+    const syncRef = doc(db, 'accountSync', 'lastSync');
+    const syncSnap = await getDoc(syncRef);
+    if (!syncSnap.exists()) {
+      await updateDoc(syncRef, {
+        profitAmount: 0,
+        lastSyncedAt: serverTimestamp(),
+        revenue: 0,
+        expenses: 0
+      });
+    }
+    
+  } catch (error) {
+    console.error('Error initializing account:', error);
+  }
+}, [currentUser]);
+
 // Call this in useEffect:
 useEffect(() => {
   initializeAccount();
@@ -934,6 +1074,29 @@ useEffect(() => {
     
     loadInitialData();
   }, [activeTab, fetchAlerts, fetchConsumptionHistory, fetchDepartments, fetchFinancialData, fetchInventoryData, fetchPurchaseOrders, fetchSalaryData]);
+
+// ==================== ADD THIS useEffect FOR INITIALIZATION ====================
+useEffect(() => {
+  const init = async () => {
+    await initializeAccount();
+    await fetchAccountBalance();
+  };
+  init();
+}, [initializeAccount, fetchAccountBalance]);
+
+// ==================== ADD THIS useEffect FOR AUTO PROFIT SYNC ====================
+useEffect(() => {
+  const autoSyncProfit = async () => {
+    if (activeTab === 'dashboard' && !refreshing) {
+      await syncProfitToAccountBalance();
+    }
+  };
+  
+  const interval = setInterval(autoSyncProfit, 60000); // Sync every minute
+  autoSyncProfit(); // Initial sync
+  
+  return () => clearInterval(interval);
+}, [activeTab, refreshing, syncProfitToAccountBalance]);
 
   // ==================== VALIDATION FUNCTIONS ====================
 
@@ -1050,17 +1213,22 @@ const handleAddExpense = async (e) => {
 
   setFormSubmitting(true);
   try {
+    const amount = Number(expenseForm.amount);
+    
+    // Add the expense to database
     const result = await addExpense({
       ...expenseForm,
-      amount: Number(expenseForm.amount)
+      amount: amount
     }, currentUser.uid);
     
     if (result.success) {
+      // Update account balance (subtract expense)
+      await updateAccountBalance(amount, expenseForm.description, 'expense', expenseForm.reference);
+      
       toast.success('Expense added successfully');
       setShowExpenseModal(false);
       resetExpenseForm();
       await fetchFinancialData();
-      await syncProfitToAccountBalance(); // Add this line
     } else {
       toast.error(result.error || 'Failed to add expense');
     }
@@ -1139,23 +1307,32 @@ const handleAddExpense = async (e) => {
     }
   };
 
-  const handleConfirmDelivery = async (poId) => {
-    setFormSubmitting(true);
-    try {
-      const result = await updatePurchaseOrderStatus(poId, 'delivered', currentUser.uid);
-      if (result.success) {
-        toast.success('Delivery confirmed - Inventory updated');
-        await Promise.all([fetchPurchaseOrders(), fetchInventoryData(), fetchFinancialData()]);
-      } else {
-        toast.error(result.error || 'Failed to confirm delivery');
-      }
-    } catch (error) {
-      console.error('Error confirming delivery:', error);
-      toast.error('Failed to confirm delivery');
-    } finally {
-      setFormSubmitting(false);
+const handleConfirmDelivery = async (poId) => {
+  setFormSubmitting(true);
+  try {
+    // Get the purchase order details first
+    const poDoc = await getDoc(doc(db, 'purchaseOrders', poId));
+    const po = poDoc.data();
+    const totalAmount = po.total || 0;
+    
+    const result = await updatePurchaseOrderStatus(poId, 'delivered', currentUser.uid);
+    
+    if (result.success) {
+      // Update account balance (subtract purchase cost)
+      await updateAccountBalance(totalAmount, `Purchase Order Delivery - ${po.itemName || po.itemId}`, 'expense', `PO-${poId.slice(-6)}`);
+      
+      toast.success('Delivery confirmed - Inventory updated');
+      await Promise.all([fetchPurchaseOrders(), fetchInventoryData(), fetchFinancialData()]);
+    } else {
+      toast.error(result.error || 'Failed to confirm delivery');
     }
-  };
+  } catch (error) {
+    console.error('Error confirming delivery:', error);
+    toast.error('Failed to confirm delivery');
+  } finally {
+    setFormSubmitting(false);
+  }
+};
 
   const handleAddInventoryItem = async (e) => {
     e.preventDefault();
@@ -1328,11 +1505,12 @@ const handleAddExpense = async (e) => {
     }
   };
 
-  const handleSalaryProcessed = async () => {
+const handleSalaryProcessed = async () => {
   toast.success('Salary processed successfully');
   await fetchSalaryData();
   await fetchFinancialData();
-  await syncProfitToAccountBalance(); // Add this line
+  await syncProfitToAccountBalance();
+  await fetchAccountBalance();
 };
 
   const resetExpenseForm = () => {
