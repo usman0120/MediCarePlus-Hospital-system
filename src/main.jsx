@@ -5,6 +5,7 @@ import './index.css';
 import { BrowserRouter } from 'react-router-dom';
 import { AuthProvider } from './context/auth/index.js'; // Added .jsx extension
 import { Toaster } from 'react-hot-toast';
+import { Analytics } from '@vercel/analytics/react';
 
 const cleanupServiceWorker = async () => {
   if (import.meta.env.DEV && typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
@@ -52,6 +53,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
             },
           }}
         />
+        <Analytics />
       </AuthProvider>
     </BrowserRouter>
   </React.StrictMode>
