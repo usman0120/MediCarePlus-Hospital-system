@@ -2,6 +2,7 @@ import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { ThemeProvider } from './context/ThemeProvider';
 import ProtectedRoute from './routes/ProtectedRoute';
+import { SpeedInsights } from '@vercel/speed-insights/react';
 
 // Pages
 import Home from './pages/Home';
@@ -33,6 +34,7 @@ function App() {
   return (
     <ThemeProvider>
       <div className="app">
+        <SpeedInsights />
         <Routes>
           {/* Public Routes - Main Pages */}
           <Route path="/" element={<Home />} />
