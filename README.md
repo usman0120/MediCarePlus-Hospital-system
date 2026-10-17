@@ -1,7 +1,7 @@
 # 🏥 MediCare Plus - Smart Hospital Management System
 
 A production-grade, enterprise-level hospital management system built with React, Firebase, and Tailwind CSS.
-
+live preview: https://medicareplushospital.vercel.app
 ## 🚀 Features
 
 ### 👥 User Roles
@@ -79,7 +79,7 @@ text
 
 1. Clone the repository
 
-git clone <https://github.com/yourusername/medicare-plus.git>
+git clone <https://github.com/usman0120/MediCarePlus-Hospital-system.git>
 cd medicare-plus
 Install dependencies
 
@@ -106,11 +106,6 @@ Start development server
 bash
 npm run dev
 Default Admin Credentials
-Email: <admin@medicareplus.com>
-
-Password: Admin@MediCare2024
-
-OTP: 123456 (for MFA simulation)
 
 📦 Deployment
 Deploy to Vercel
@@ -213,10 +208,10 @@ Vercel for hosting
 All contributors and testers
 
 📞 Support
-For support, email <support@medicareplus.com> or create an issue in the repository.
+For support, create an issue in the repository.
 
 🚨 Important Notes
-Never commit .env file
+Never commit the .env file
 
 Keep Firebase rules updated
 
