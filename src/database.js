@@ -20,7 +20,12 @@ import {
   onSnapshot,
   deleteDoc
 } from 'firebase/firestore';
-import { db } from './firebase';
+import { auth, db } from './firebase';
+import {
+  assert as ensure, WorkflowError, requireId, requireText, requireNumber, requireDate,
+  appointmentInstant, hospitalDate, monthDates, moneyToMinor, invoiceLine, invoiceTotals,
+  salaryCalculation, validateAttachment, validatePayrollPolicy,
+} from './utils/transactions.js';
 import { compressData, generatePDF, formatCurrency, formatTime } from '../src/utils/helpers';
 import { 
   APPOINTMENT_STATUS, 
@@ -31,9 +36,1022 @@ import {
   OPERATION_STATUS, 
   AUDIT_ACTIONS,
   ALERT_TYPES,
-  ALERT_SEVERITY
+  ALERT_SEVERITY,
+  DEFAULT_PAYROLL_POLICY,
 } from './utils/constants';
 import { createStaffUser } from './auth.js';
+
+// V2 FOUNDATION. This is the authoritative workflow API. Legacy dashboard adapters
+// below are retained during migration; Firestore rules deny their unsafe writes.
+// Client injection allows integration testing with real emulator SDK clients;
+// it cannot bypass Firestore's independently enforced authorization.
+export const createHospitalDatabase = ({ auth, db }) => {
+const hospitalCollections = new Set([
+  'users', 'appointments', 'visits', 'invoices', 'beds', 'inventory', 'labRequests',
+  'operations', 'attendance', 'salaryRecords', 'chats', 'messages', 'auditLogs', 'departments', 'ratings',
+]);
+const refFor = (name, id) => {
+  ensure(hospitalCollections.has(name), 'validation', 'Unsupported collection.');
+  return doc(db, name, requireId(id));
+};
+const normalized = value => {
+  if (value instanceof Timestamp) return value.toDate();
+  if (Array.isArray(value)) return value.map(normalized);
+  if (value && typeof value === 'object' && !(value instanceof Date)) {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, normalized(item)]));
+  }
+  return value;
+};
+const rowFrom = snapshot => ({ ...normalized(snapshot.data()), id: snapshot.id });
+const resultOf = async work => {
+  try { return { success: true, data: await work() }; }
+  catch (error) {
+    const messages = {
+      'permission-denied': 'Access denied. Check your role, email verification and record ownership.',
+      unavailable: 'The hospital database is unavailable. No transaction was completed. Reconnect and retry.',
+      aborted: 'Another user changed this record. Refresh and retry.',
+      'failed-precondition': 'A database index or workflow prerequisite is missing. Contact the administrator.',
+    };
+    return { success: false, code: error.code || 'unexpected',
+      error: error instanceof WorkflowError ? error.message : messages[error.code] || 'Unable to complete this operation. Please retry or contact support.',
+      fields: error instanceof WorkflowError ? error.fields : {},
+      ...(import.meta.env.MODE === 'test' ? { diagnostic: error.message } : {}) };
+  }
+};
+const readRequired = async (transaction, name, id) => {
+  const ref = refFor(name, id);
+  const snapshot = await transaction.get(ref);
+  ensure(snapshot.exists(), 'not-found', `${name} record was not found.`);
+  return { ref, data: snapshot.data() };
+};
+const assertDocumentSize = data => {
+  // Field names, document name, timestamp and index metadata also cost bytes.
+  ensure(new TextEncoder().encode(JSON.stringify(data)).length < 900_000,
+    'document-too-large', 'This record is too large. Reduce the attached file or split the clinical visit.');
+};
+const actorIn = async (transaction, roles) => {
+  const user = auth.currentUser;
+  ensure(user?.uid, 'unauthenticated', 'Please sign in.');
+  ensure(user.emailVerified, 'email-unverified', 'Verify your email before using hospital services.');
+  const profile = await readRequired(transaction, 'users', user.uid);
+  ensure(profile.data.schemaVersion === 2, 'migration-required', 'This profile must be migrated before using the new hospital workflows.');
+  ensure(profile.data.accountStatus === 'active', 'account-disabled', 'Your account is disabled.');
+  ensure(roles.includes(profile.data.role), 'forbidden', 'Your role cannot perform this action.');
+  return { ...profile.data, id: user.uid };
+};
+const auditRef = () => doc(collection(db, 'auditLogs'));
+const recordAudit = (transaction, log, actor, action, name, id, details = {}) => {
+  transaction.set(log, { schemaVersion: 2, actorId: actor.id, userId: actor.id,
+    action, targetCollection: name, targetId: id, details, timestamp: serverTimestamp() });
+};
+const writeRecord = (transaction, ref, data, actor, log, previous = null) => {
+  const record = { ...data, schemaVersion: 2, revision: (previous?.revision || 0) + 1,
+    updatedAt: serverTimestamp(), updatedBy: actor.id, lastAuditId: log.id };
+  if (!previous) Object.assign(record, { createdAt: serverTimestamp(), createdBy: actor.id });
+  assertDocumentSize({ ...(previous || {}), ...record });
+  if (previous) transaction.update(ref, record); else transaction.set(ref, record);
+};
+const mutation = (roles, action, name, id, work) => resultOf(async () => {
+  const log = auditRef(); // Allocated once, NOT once per transaction retry.
+  return runTransaction(db, async transaction => {
+    const actor = await actorIn(transaction, roles);
+    return work(transaction, actor, log, details => recordAudit(transaction, log, actor, action, name, id, details));
+  });
+});
+const clinicalOwner = (actor, visit) => {
+  ensure(actor.role === 'doctor' && visit.doctorId === actor.id, 'forbidden', 'Only the assigned doctor can change this visit.');
+  ensure(!visit.locked, 'record-locked', 'This medical record is locked. An administrator must authorize an amendment.');
+};
+const slotId = (doctorId, date, time) => `slot_${requireId(doctorId)}_${requireDate(date)}_${time.replace(':', '')}`;
+const chatIdFor = (doctorId, patientId) => `chat_${requireId(doctorId)}_${requireId(patientId)}`;
+const salaryIdFor = (userId, month, year) => `${requireId(userId)}_${year}-${String(month).padStart(2, '0')}`;
+const appointmentSlots = (doctor, date) => {
+  requireDate(date);
+  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+  const schedule = doctor.schedule;
+  ensure(schedule && Array.isArray(schedule.weekdays) && Array.isArray(schedule.times),
+    'schedule-required', 'The administrator must configure the doctor’s schedule first.');
+  return schedule.weekdays.includes(weekday) && !(schedule.closedDates || []).includes(date) ? schedule.times : [];
+};
+const publicDoctor = (department, doctorId) => {
+  const doctor = department.doctorProfiles?.[doctorId];
+  ensure(department.active === true && department.doctorIds?.includes(doctorId) && doctor?.active === true,
+    'doctor-unavailable', 'Doctor is not active in this department.');
+  requireNumber(doctor.consultationFeeMinor, 'consultationFeeMinor', 0, 100_000_000_000, true);
+  return doctor;
+};
+const appendLine = (invoice, line) => {
+  ensure(invoice.status === 'unpaid' && !invoice.locked, 'invoice-locked', 'Only unpaid invoices can receive additional charges.');
+  const items = [...invoice.items, line];
+  return { items, ...invoiceTotals(items, invoice.taxBasisPoints) };
+};
+const invoiceFor = (visit, line) => ({
+  patientId: visit.patientId, doctorId: visit.doctorId, departmentId: visit.departmentId,
+  visitId: visit.id, appointmentId: visit.appointmentId, items: [line], ...invoiceTotals([line]),
+  status: 'unpaid', locked: false, payment: null, paymentProof: null, paidAt: null,
+});
+const emrFields = input => {
+  ensure(input && typeof input === 'object', 'validation', 'EMR data is required.');
+  const vitals = {};
+  for (const [key, max] of [['sugar', 1500], ['heartRate', 350], ['temperature', 50]]) {
+    const value = input.vitals?.[key] ?? (key === 'temperature' ? input.vitals?.temp : null);
+    vitals[key] = value == null || value === '' ? null : requireNumber(Number(value), key, 0, max);
+  }
+  const bp = input.vitals?.bp || '';
+  ensure(bp === '' || /^(\d{2,3})\/(\d{2,3})$/.test(bp), 'validation', 'Blood pressure must be systolic/diastolic.');
+  if (bp) {
+    const [systolic, diastolic] = bp.split('/').map(Number);
+    ensure(systolic > diastolic && systolic >= 40 && systolic <= 300 && diastolic >= 20 && diastolic <= 200,
+      'validation', 'Blood pressure is outside supported recording limits.');
+  }
+  vitals.bp = bp;
+  const prescription = input.prescription || [];
+  ensure(Array.isArray(prescription) && prescription.length <= 30, 'validation', 'At most 30 prescription medicines are allowed.');
+  const medicines = prescription.map(medicine => ({
+    name: requireText(medicine.name, 'medicine name', 150), dose: requireText(medicine.dose, 'dose', 100),
+    frequency: requireText(medicine.frequency, 'frequency', 100), duration: requireText(medicine.duration, 'duration', 100),
+    instructions: requireText(medicine.instructions || '', 'instructions', 500, true),
+  }));
+  const followUpDate = input.followUpDate || null;
+  if (followUpDate) { requireDate(followUpDate); ensure(followUpDate >= hospitalDate(), 'validation', 'Follow-up date cannot be in the past.'); }
+  return { chiefComplaint: requireText(input.chiefComplaint, 'chiefComplaint'),
+    symptoms: requireText(input.symptoms, 'symptoms', 4000), diagnosis: requireText(input.diagnosis, 'diagnosis', 4000),
+    notes: requireText(input.notes || '', 'notes', 6000, true), vitals, prescription: medicines, followUpDate };
+};
+
+/**
+ * Authoritative V2 API: result envelopes, bounded reads, stable IDs, explicit
+ * transitions, integer PKR paisa, transaction-only multi-document mutations.
+ * Actor IDs are taken from Firebase Auth, never trusted from form arguments.
+ */
+const hospital = {
+  getRecord: (name, id) => resultOf(async () => {
+    const snapshot = await getDoc(refFor(name, id));
+    ensure(snapshot.exists(), 'not-found', 'Record not found.');
+    return rowFrom(snapshot);
+  }),
+
+  listRecords: (name, filters = {}, options = {}) => resultOf(async () => {
+    ensure(hospitalCollections.has(name), 'validation', 'Unsupported collection.');
+    const pageSize = requireNumber(options.pageSize ?? 20, 'pageSize', 1, 100, true);
+    const constraints = [];
+    for (const [key, value] of Object.entries(filters)) {
+      ensure(['role', 'patientId', 'doctorId', 'userId', 'status', 'departmentId', 'date', 'month', 'year', 'kind', 'chatId', 'actorId', 'action'].includes(key),
+        'validation', 'Unsupported query filter.');
+      ensure(value != null && ['string', 'number', 'boolean'].includes(typeof value), 'validation', 'Invalid query filter.');
+      constraints.push(where(key, '==', value));
+    }
+    const sort = options.orderBy || (name === 'messages' ? 'timestamp' : name === 'auditLogs' ? 'timestamp' : 'createdAt');
+    ensure(['createdAt', 'updatedAt', 'timestamp', 'date', 'fullName', 'name', 'paidAt', 'lastMessageAt'].includes(sort), 'validation', 'Unsupported sort field.');
+    ensure(['asc', 'desc'].includes(options.direction || 'desc'), 'validation', 'Invalid sort direction.');
+    constraints.push(orderBy(sort, options.direction || 'desc'));
+    if (options.cursor) constraints.push(startAfter(options.cursor));
+    constraints.push(limit(pageSize));
+    const snapshot = await getDocs(query(collection(db, name), ...constraints));
+    return { records: snapshot.docs.map(rowFrom), cursor: snapshot.docs.at(-1) || null,
+      hasMore: snapshot.size === pageSize, fromCache: snapshot.metadata.fromCache };
+  }),
+
+  subscribe: (name, filters, onData, onError, pageSize = 30) => {
+    ensure(typeof onData === 'function' && typeof onError === 'function', 'validation', 'Subscription requires data and error callbacks.');
+    ensure(hospitalCollections.has(name), 'validation', 'Unsupported collection.');
+    requireNumber(pageSize, 'pageSize', 1, 100, true);
+    const constraints = Object.entries(filters).map(([key, value]) => {
+      ensure(['patientId', 'doctorId', 'userId', 'chatId', 'status', 'kind'].includes(key), 'validation', 'Unsupported subscription filter.');
+      return where(key, '==', value);
+    });
+    constraints.push(orderBy(name === 'messages' ? 'timestamp' : 'createdAt', 'desc'), limit(pageSize));
+    return onSnapshot(query(collection(db, name), ...constraints), { includeMetadataChanges: true },
+      snapshot => onData({ records: snapshot.docs.map(rowFrom), cursor: snapshot.docs.at(-1) || null,
+        fromCache: snapshot.metadata.fromCache, pendingWrites: snapshot.metadata.hasPendingWrites }),
+      error => onError({ success: false, code: error.code, error: 'Live updates failed. Reconnect or refresh.' }));
+  },
+
+  bookAppointment: input => resultOf(async () => {
+    requireId(input.patientId, 'patientId'); requireId(input.doctorId, 'doctorId'); requireId(input.departmentId, 'departmentId');
+    const instant = appointmentInstant(input.date, input.time);
+    ensure(instant > new Date(), 'validation', 'Choose a future appointment time in Pakistan time.');
+    const reason = requireText(input.reason, 'reason', 2000);
+    const id = input.requestId ? requireId(input.requestId) : `apt_${crypto.randomUUID()}`;
+    const bookingRef = refFor('appointments', id);
+    const slotRef = refFor('appointments', slotId(input.doctorId, input.date, input.time));
+    const log = auditRef();
+    return runTransaction(db, async transaction => {
+      const actor = await actorIn(transaction, ['patient', 'receptionist', 'admin']);
+      ensure(actor.role !== 'patient' || actor.id === input.patientId, 'forbidden', 'You can only book for yourself.');
+      ensure(!input.isEmergency || actor.role !== 'patient', 'forbidden', 'Emergency triage must be assessed at reception.');
+      const patient = await readRequired(transaction, 'users', input.patientId);
+      ensure(patient.data.role === 'patient' && patient.data.accountStatus === 'active', 'validation', 'Select an active patient.');
+      const department = await readRequired(transaction, 'departments', input.departmentId);
+      const doctor = publicDoctor(department.data, input.doctorId);
+      ensure(appointmentSlots(doctor, input.date).includes(input.time), 'doctor-unavailable', 'This time is outside the doctor’s configured schedule.');
+      const [existing, slotSnapshot] = await Promise.all([
+        transaction.get(bookingRef), transaction.get(slotRef),
+      ]);
+      if (existing.exists()) {
+        const saved = existing.data();
+        ensure(saved.patientId === input.patientId && saved.doctorId === input.doctorId && saved.date === input.date && saved.time === input.time,
+          'duplicate', 'This request ID belongs to a different booking.');
+        return { ...normalized(saved), id, alreadyCompleted: true };
+      }
+      ensure(!slotSnapshot.exists() || slotSnapshot.data().status === 'available', 'slot-unavailable', 'Another patient has already reserved this slot.');
+      const appointment = { kind: 'appointment', patientId: input.patientId, doctorId: input.doctorId,
+        departmentId: input.departmentId, department: department.data.name, date: input.date, time: input.time,
+        scheduledAt: Timestamp.fromDate(instant), reason, status: 'scheduled', slotId: slotRef.id,
+        patientName: patient.data.fullName, doctorName: doctor.fullName, consultationFeeMinor: doctor.consultationFeeMinor,
+        paymentAmount: doctor.consultationFeeMinor / 100, paymentStatus: 'unpaid',
+        isEmergency: Boolean(input.isEmergency), triage: null, triagePriority: 3, visitId: null, invoiceId: null };
+      writeRecord(transaction, bookingRef, appointment, actor, log);
+      writeRecord(transaction, slotRef, { kind: 'slot', doctorId: input.doctorId, date: input.date,
+        time: input.time, appointmentId: id, status: 'reserved' }, actor, log, slotSnapshot.exists() ? slotSnapshot.data() : null);
+      const careTeamIds = [...new Set([...(patient.data.careTeamIds || []), input.doctorId])];
+      ensure(careTeamIds.length <= 50, 'limit-exceeded', 'Patient care team requires administrative review.');
+      writeRecord(transaction, patient.ref, { careTeamIds }, actor, log, patient.data);
+      recordAudit(transaction, log, actor, 'APPOINTMENT_CREATED', 'appointments', id, { slotId: slotRef.id });
+      return { ...appointment, id };
+    });
+  }),
+
+  availableSlots: (departmentId, doctorId, date) => resultOf(async () => {
+    const department = await getDoc(refFor('departments', departmentId));
+    ensure(department.exists(), 'not-found', 'Department not found.');
+    const doctor = publicDoctor(department.data(), doctorId);
+    const times = appointmentSlots(doctor, date).filter(time => appointmentInstant(date, time) > new Date());
+    ensure(times.length <= 48, 'validation', 'A doctor schedule can contain at most 48 daily slots.');
+    const snapshots = await Promise.all(times.map(time => getDoc(refFor('appointments', slotId(doctorId, date, time)))));
+    return times.map((time, i) => ({ time, display: formatTime(time), available: !snapshots[i].exists() || snapshots[i].data().status === 'available' }));
+  }),
+
+  transitionAppointment: (id, status, reason = '') => mutation(['patient', 'receptionist', 'doctor', 'admin'],
+    'APPOINTMENT_UPDATED', 'appointments', id, async (transaction, actor, log, audit) => {
+      const record = await readRequired(transaction, 'appointments', id);
+      const appointment = record.data;
+      ensure(appointment.kind === 'appointment', 'validation', 'Select a patient appointment, not a slot.');
+      const transitions = { scheduled: ['confirmed', 'cancelled', 'no-show'], confirmed: ['checked-in', 'cancelled', 'no-show'] };
+      ensure(transitions[appointment.status]?.includes(status), 'invalid-transition', 'This appointment cannot move to that status.');
+      if (actor.role === 'patient') ensure(appointment.patientId === actor.id && status === 'cancelled', 'forbidden', 'Patients can only cancel their own upcoming appointments.');
+      if (actor.role === 'doctor') ensure(appointment.doctorId === actor.id && status === 'cancelled', 'forbidden', 'Doctors may only cancel their own appointments.');
+      if (status === 'no-show') ensure(appointment.scheduledAt.toMillis() < Date.now(), 'validation', 'Cannot mark a future appointment as no-show.');
+      if (status === 'checked-in') ensure(appointment.date === hospitalDate(), 'validation', 'Check-in must be on the appointment date.');
+      const slot = await readRequired(transaction, 'appointments', appointment.slotId);
+      ensure(slot.data.appointmentId === id && slot.data.status === 'reserved', 'conflict', 'Appointment slot linkage is inconsistent.');
+      const terminal = ['cancelled', 'no-show'].includes(status);
+      writeRecord(transaction, record.ref, { status, statusReason: requireText(reason, 'reason', 1000, true),
+        ...(status === 'checked-in' ? { checkedInAt: serverTimestamp(), checkedInBy: actor.id } : {}) }, actor, log, appointment);
+      if (terminal) writeRecord(transaction, slot.ref, { status: 'available', appointmentId: null }, actor, log, slot.data);
+      audit({ fromStatus: appointment.status, toStatus: status });
+      return { id, status };
+    }),
+
+  rescheduleAppointment: (id, date, time, reason = '') => mutation(['patient', 'receptionist', 'admin'],
+    'APPOINTMENT_RESCHEDULED', 'appointments', id, async (transaction, actor, log, audit) => {
+      const instant = appointmentInstant(date, time);
+      ensure(instant > new Date(), 'validation', 'Choose a future appointment time.');
+      const appointment = await readRequired(transaction, 'appointments', id);
+      ensure(['scheduled', 'confirmed'].includes(appointment.data.status), 'invalid-transition', 'Only upcoming appointments can be rescheduled.');
+      ensure(actor.role !== 'patient' || actor.id === appointment.data.patientId, 'forbidden', 'You cannot reschedule another patient’s appointment.');
+      ensure(date !== appointment.data.date || time !== appointment.data.time, 'validation', 'Choose a different slot.');
+      const department = await readRequired(transaction, 'departments', appointment.data.departmentId);
+      const doctor = publicDoctor(department.data, appointment.data.doctorId);
+      ensure(appointmentSlots(doctor, date).includes(time), 'doctor-unavailable', 'Choose a configured doctor slot.');
+      const oldSlot = await readRequired(transaction, 'appointments', appointment.data.slotId);
+      const newSlotRef = refFor('appointments', slotId(appointment.data.doctorId, date, time));
+      const newSlot = await transaction.get(newSlotRef);
+      ensure(oldSlot.data.appointmentId === id, 'conflict', 'Old slot linkage is inconsistent.');
+      ensure(!newSlot.exists() || newSlot.data().status === 'available', 'slot-unavailable', 'New slot has been reserved by another patient.');
+      writeRecord(transaction, oldSlot.ref, { status: 'available', appointmentId: null }, actor, log, oldSlot.data);
+      writeRecord(transaction, newSlotRef, { kind: 'slot', doctorId: appointment.data.doctorId, date, time,
+        appointmentId: id, status: 'reserved' }, actor, log, newSlot.exists() ? newSlot.data() : null);
+      writeRecord(transaction, appointment.ref, { date, time, scheduledAt: Timestamp.fromDate(instant),
+        slotId: newSlotRef.id, status: 'scheduled', statusReason: requireText(reason, 'reason', 1000, true) }, actor, log, appointment.data);
+      audit({ previousDate: appointment.data.date, previousTime: appointment.data.time, date, time });
+      return { id, date, time };
+    }),
+
+  startVisit: appointmentId => mutation(['doctor'], 'VISIT_CREATED', 'visits', appointmentId,
+    async (transaction, actor, log, audit) => {
+      const appointment = await readRequired(transaction, 'appointments', appointmentId);
+      ensure(appointment.data.doctorId === actor.id, 'forbidden', 'You are not the assigned doctor.');
+      const visitRef = refFor('visits', appointmentId);
+      const invoiceRef = refFor('invoices', appointmentId);
+      const [existingVisit, existingInvoice] = await Promise.all([transaction.get(visitRef), transaction.get(invoiceRef)]);
+      if (existingVisit.exists()) return { id: appointmentId, ...normalized(existingVisit.data()), alreadyCompleted: true };
+      ensure(appointment.data.status === 'checked-in', 'invalid-transition', 'Reception must check in the patient before consultation.');
+      ensure(!existingInvoice.exists(), 'conflict', 'An invoice already exists without a visit. Contact the administrator.');
+      const patient = await readRequired(transaction, 'users', appointment.data.patientId);
+      ensure(!patient.data.activeVisitId, 'active-visit', 'Patient already has an active visit.');
+      const chatRef = refFor('chats', chatIdFor(actor.id, appointment.data.patientId));
+      const chatSnapshot = await transaction.get(chatRef);
+      const visit = { id: appointmentId, appointmentId, patientId: appointment.data.patientId, doctorId: actor.id,
+        departmentId: appointment.data.departmentId, patientName: appointment.data.patientName,
+        doctorName: appointment.data.doctorName, status: 'active', locked: false, invoiceId: appointmentId,
+        chiefComplaint: appointment.data.reason, symptoms: '', diagnosis: '', vitals: { bp: '', sugar: null, heartRate: null, temperature: null },
+        prescription: [], prescriptionPdf: null, followUpDate: null, notes: '', bedId: null,
+        openLabRequests: 0, openOperations: 0, dischargedAt: null, unlockReason: null };
+      const line = invoiceLine(`consult_${appointmentId}`, 'Consultation', 1, appointment.data.consultationFeeMinor, 'consultation', appointmentId);
+      writeRecord(transaction, visitRef, visit, actor, log);
+      writeRecord(transaction, invoiceRef, invoiceFor(visit, line), actor, log);
+      writeRecord(transaction, appointment.ref, { status: 'in-progress', visitId: appointmentId, invoiceId: appointmentId }, actor, log, appointment.data);
+      writeRecord(transaction, patient.ref, { activeVisitId: appointmentId }, actor, log, patient.data);
+      if (!chatSnapshot.exists()) writeRecord(transaction, chatRef, { doctorId: actor.id, patientId: appointment.data.patientId,
+        participants: [actor.id, appointment.data.patientId], appointmentId, lastMessage: null,
+        lastMessageAt: serverTimestamp(), unreadCount: { [actor.id]: 0, [appointment.data.patientId]: 0 },
+        sequence: 0, readSequence: { [actor.id]: 0, [appointment.data.patientId]: 0 } }, actor, log);
+      audit({ appointmentId, invoiceId: appointmentId });
+      return visit;
+    }),
+
+  saveEMR: (visitId, input, expectedRevision) => mutation(['doctor'], 'VISIT_UPDATED', 'visits', visitId,
+    async (transaction, actor, log, audit) => {
+      const visit = await readRequired(transaction, 'visits', visitId);
+      clinicalOwner(actor, visit.data);
+      requireNumber(expectedRevision, 'expectedRevision', 1, Number.MAX_SAFE_INTEGER, true);
+      ensure(visit.data.revision === expectedRevision, 'stale-record', 'This visit changed while you were editing. Reload before saving.');
+      const fields = emrFields(input);
+      writeRecord(transaction, visit.ref, fields, actor, log, visit.data);
+      audit({ amendedAfterDischarge: visit.data.status === 'discharged' });
+      return { id: visitId, revision: expectedRevision + 1, ...fields };
+    }),
+
+  savePrescription: (visitId, medicines, pdf, expectedRevision) => mutation(['doctor'], 'PRESCRIPTION_ADDED', 'visits', visitId,
+    async (transaction, actor, log, audit) => {
+      const visit = await readRequired(transaction, 'visits', visitId);
+      clinicalOwner(actor, visit.data);
+      ensure(visit.data.revision === expectedRevision, 'stale-record', 'Visit changed. Regenerate the prescription from the latest record.');
+      ensure(Array.isArray(medicines) && medicines.length > 0, 'validation', 'Select at least one medicine.');
+      const fields = emrFields({ ...visit.data, prescription: medicines });
+      validateAttachment(pdf);
+      ensure(pdf.mimeType === 'application/pdf', 'validation', 'Prescription must be a PDF.');
+      writeRecord(transaction, visit.ref, { prescription: fields.prescription, prescriptionPdf: pdf }, actor, log, visit.data);
+      audit({ medicineCount: medicines.length, pdfChecksum: pdf.sha256 });
+      return { id: visitId, revision: expectedRevision + 1 };
+    }),
+
+  dischargeVisit: (visitId, notes = '') => mutation(['doctor'], 'VISIT_DISCHARGED', 'visits', visitId,
+    async (transaction, actor, log, audit) => {
+      const visit = await readRequired(transaction, 'visits', visitId);
+      ensure(visit.data.doctorId === actor.id, 'forbidden', 'Only the assigned doctor can discharge.');
+      if (visit.data.status === 'discharged' && visit.data.locked) return { id: visitId, invoiceId: visit.data.invoiceId, alreadyCompleted: true };
+      clinicalOwner(actor, visit.data);
+      ensure(visit.data.status === 'active', 'invalid-transition', 'Visit is not active.');
+      emrFields(visit.data);
+      ensure(!visit.data.bedId, 'bed-occupied', 'Reception must release or transfer the patient’s bed before discharge.');
+      ensure(visit.data.openOperations === 0 && visit.data.openLabRequests === 0, 'pending-clinical-work', 'Complete or cancel pending lab requests and operations before discharge.');
+      const patient = await readRequired(transaction, 'users', visit.data.patientId);
+      const appointment = await readRequired(transaction, 'appointments', visit.data.appointmentId);
+      const slot = await readRequired(transaction, 'appointments', appointment.data.slotId);
+      const invoice = await readRequired(transaction, 'invoices', visit.data.invoiceId);
+      ensure(patient.data.activeVisitId === visitId && slot.data.appointmentId === visit.data.appointmentId,
+        'conflict', 'Visit, patient or appointment linkage is inconsistent.');
+      writeRecord(transaction, visit.ref, { status: 'discharged', locked: true, dischargedAt: serverTimestamp(),
+        dischargeNotes: requireText(notes, 'dischargeNotes', 4000, true) }, actor, log, visit.data);
+      writeRecord(transaction, patient.ref, { activeVisitId: null }, actor, log, patient.data);
+      writeRecord(transaction, appointment.ref, { status: 'completed' }, actor, log, appointment.data);
+      writeRecord(transaction, slot.ref, { status: 'available', appointmentId: null }, actor, log, slot.data);
+      audit({ invoiceId: visit.data.invoiceId, totalMinor: invoice.data.totalMinor });
+      return { id: visitId, invoiceId: visit.data.invoiceId, total: invoice.data.total };
+    }),
+
+  unlockVisit: (visitId, reason) => mutation(['admin'], 'RECORD_UNLOCKED', 'visits', visitId,
+    async (transaction, actor, log, audit) => {
+      const visit = await readRequired(transaction, 'visits', visitId);
+      ensure(visit.data.locked && visit.data.status === 'discharged', 'invalid-transition', 'Only locked discharged records can be unlocked.');
+      const unlockReason = requireText(reason, 'unlockReason', 2000);
+      writeRecord(transaction, visit.ref, { locked: false, unlockedAt: serverTimestamp(), unlockedBy: actor.id, unlockReason }, actor, log, visit.data);
+      audit({ reason: unlockReason });
+      return { id: visitId };
+    }),
+
+  relockVisit: visitId => mutation(['admin', 'doctor'], 'RECORD_RELOCKED', 'visits', visitId,
+    async (transaction, actor, log, audit) => {
+      const visit = await readRequired(transaction, 'visits', visitId);
+      ensure(visit.data.status === 'discharged' && !visit.data.locked, 'invalid-transition', 'Record is not an unlocked discharged record.');
+      ensure(actor.role === 'admin' || visit.data.doctorId === actor.id, 'forbidden', 'Only the assigned doctor or admin can relock.');
+      writeRecord(transaction, visit.ref, { locked: true }, actor, log, visit.data); audit(); return { id: visitId };
+    }),
+
+  submitPaymentProof: (invoiceId, proof, reference, method = 'bank_transfer') => mutation(['patient'],
+    'PAYMENT_PROOF_SUBMITTED', 'invoices', invoiceId, async (transaction, actor, log, audit) => {
+      validateAttachment(proof);
+      ensure(['bank_transfer', 'online', 'card'].includes(method), 'validation', 'Select a supported payment method.');
+      const invoice = await readRequired(transaction, 'invoices', invoiceId);
+      ensure(invoice.data.patientId === actor.id, 'forbidden', 'This invoice does not belong to you.');
+      ensure(invoice.data.status === 'unpaid' && !invoice.data.locked, 'invoice-locked', 'Invoice cannot accept another payment proof.');
+      const payment = { method, reference: requireText(reference, 'paymentReference', 150), submittedBy: actor.id,
+        amountMinor: invoice.data.totalMinor, submittedAt: serverTimestamp() };
+      writeRecord(transaction, invoice.ref, { status: 'pending_confirmation', paymentProof: proof, payment }, actor, log, invoice.data);
+      audit({ amountMinor: invoice.data.totalMinor }); return { id: invoiceId };
+    }),
+
+  rejectPayment: (invoiceId, reason) => mutation(['receptionist', 'admin'], 'PAYMENT_PROOF_REJECTED', 'invoices', invoiceId,
+    async (transaction, actor, log, audit) => {
+      const invoice = await readRequired(transaction, 'invoices', invoiceId);
+      ensure(invoice.data.status === 'pending_confirmation' && !invoice.data.locked, 'invalid-transition', 'No pending proof to reject.');
+      const rejectionReason = requireText(reason, 'rejectionReason', 1000);
+      writeRecord(transaction, invoice.ref, { status: 'unpaid', payment: null, paymentProof: null, rejectionReason }, actor, log, invoice.data);
+      audit({ reason: rejectionReason }); return { id: invoiceId };
+    }),
+
+  confirmPayment: (invoiceId, cashPayment = null) => mutation(['receptionist', 'admin'], 'PAYMENT_CONFIRMED', 'invoices', invoiceId,
+    async (transaction, actor, log, audit) => {
+      const invoice = await readRequired(transaction, 'invoices', invoiceId);
+      if (invoice.data.status === 'paid') return { id: invoiceId, alreadyCompleted: true };
+      ensure(!invoice.data.locked, 'invoice-locked', 'Invoice is locked.');
+      const totals = invoiceTotals(invoice.data.items, invoice.data.taxBasisPoints);
+      ensure(totals.totalMinor === invoice.data.totalMinor, 'corrupt-invoice', 'Invoice total is inconsistent.');
+      if (cashPayment) {
+        ensure(invoice.data.status === 'unpaid' && cashPayment.method === 'cash', 'invalid-transition', 'Cash confirmation requires an unpaid invoice.');
+        ensure(cashPayment.amountMinor === invoice.data.totalMinor, 'validation', 'Cash amount must exactly match the invoice total.');
+        requireText(cashPayment.reference, 'cashReceiptReference', 150);
+      } else ensure(invoice.data.status === 'pending_confirmation' && invoice.data.paymentProof,
+        'proof-required', 'Patient must submit proof, or reception must record an actual cash receipt.');
+      const department = await readRequired(transaction, 'departments', invoice.data.departmentId);
+      const appointment = await readRequired(transaction, 'appointments', invoice.data.appointmentId);
+      const payment = cashPayment ? { method: 'cash', amountMinor: cashPayment.amountMinor, reference: cashPayment.reference } : invoice.data.payment;
+      writeRecord(transaction, invoice.ref, { status: 'paid', locked: true, paidAt: serverTimestamp(),
+        payment: { ...payment, confirmedBy: actor.id, confirmedAt: serverTimestamp() } }, actor, log, invoice.data);
+      const revenueMinor = requireNumber((department.data.revenueMinor || 0) + totals.totalMinor,
+        'departmentRevenue', 0, Number.MAX_SAFE_INTEGER, true);
+      writeRecord(transaction, department.ref, { revenueMinor, revenue: revenueMinor / 100,
+        collectedRevenue: revenueMinor / 100, lastPaidInvoiceId: invoiceId }, actor, log, department.data);
+      writeRecord(transaction, appointment.ref, { paymentStatus: 'paid' }, actor, log, appointment.data);
+      audit({ amountMinor: totals.totalMinor, departmentId: invoice.data.departmentId, reference: payment.reference });
+      return { id: invoiceId, total: totals.total };
+    }),
+
+  requestLabTest: (visitId, testId, priority = 'normal', requestId = `lab_${crypto.randomUUID()}`) => mutation(['doctor'],
+    'LAB_REQUEST_CREATED', 'labRequests', requestId, async (transaction, actor, log, audit) => {
+      requireId(testId, 'testId');
+      ensure(['normal', 'urgent', 'stat'].includes(priority), 'validation', 'Invalid lab priority.');
+      const visit = await readRequired(transaction, 'visits', visitId); clinicalOwner(actor, visit.data);
+      ensure(visit.data.status === 'active', 'invalid-transition', 'Request tests during an active visit.');
+      ensure(visit.data.openLabRequests < 10, 'limit-exceeded', 'At most 10 outstanding lab requests per visit.');
+      const department = await readRequired(transaction, 'departments', visit.data.departmentId);
+      const service = department.data.services?.[testId];
+      ensure(service?.type === 'lab' && service.active === true, 'validation', 'Select an active lab service.');
+      const requestRef = refFor('labRequests', requestId);
+      const existing = await transaction.get(requestRef);
+      if (existing.exists()) {
+        ensure(existing.data().visitId === visitId && existing.data().testId === testId, 'duplicate', 'Request ID is already used.');
+        return { id: requestId, alreadyCompleted: true };
+      }
+      const invoice = await readRequired(transaction, 'invoices', visit.data.invoiceId);
+      const line = invoiceLine(requestId, service.name, 1, service.priceMinor, 'lab', requestId);
+      const updatedInvoice = appendLine(invoice.data, line);
+      const request = { visitId, invoiceId: visit.data.invoiceId, patientId: visit.data.patientId,
+        doctorId: actor.id, departmentId: visit.data.departmentId, testId, testName: service.name,
+        priceMinor: service.priceMinor, priority, status: 'pending', result: null, completedAt: null };
+      writeRecord(transaction, requestRef, request, actor, log);
+      writeRecord(transaction, invoice.ref, updatedInvoice, actor, log, invoice.data);
+      writeRecord(transaction, visit.ref, { openLabRequests: visit.data.openLabRequests + 1 }, actor, log, visit.data);
+      audit({ visitId, invoiceId: visit.data.invoiceId }); return { id: requestId, ...request };
+    }),
+
+  completeLabTest: (requestId, attachment, summary) => mutation(['lab'], 'LAB_RESULT_UPLOADED', 'labRequests', requestId,
+    async (transaction, actor, log, audit) => {
+      validateAttachment(attachment);
+      const request = await readRequired(transaction, 'labRequests', requestId);
+      ensure(['pending', 'in-progress'].includes(request.data.status), 'invalid-transition', 'Lab request is already completed or cancelled.');
+      writeRecord(transaction, request.ref, { status: 'completed', result: attachment,
+        resultSummary: requireText(summary, 'resultSummary', 4000), completedAt: serverTimestamp(), completedBy: actor.id }, actor, log, request.data);
+      // Lab staff cannot read the patient's EMR. Atomic transforms update only
+      // the outstanding counter; rules validate the visit's state and linkage.
+      transaction.update(refFor('visits', request.data.visitId), { openLabRequests: increment(-1),
+        revision: increment(1), schemaVersion: 2, updatedAt: serverTimestamp(), updatedBy: actor.id, lastAuditId: log.id });
+      audit({ visitId: request.data.visitId, checksum: attachment.sha256 }); return { id: requestId };
+    }),
+
+  assignBed: (bedId, patientId, visitId = null) => mutation(['receptionist', 'admin'], 'BED_ASSIGNED', 'beds', bedId,
+    async (transaction, actor, log, audit) => {
+      const bed = await readRequired(transaction, 'beds', bedId);
+      const patient = await readRequired(transaction, 'users', patientId);
+      const activeVisitId = visitId || patient.data.activeVisitId;
+      requireId(activeVisitId, 'activeVisitId');
+      const invoice = await readRequired(transaction, 'invoices', activeVisitId);
+      ensure(bed.data.status === 'available' && !patient.data.currentBedId, 'bed-unavailable', 'Bed or patient already has an assignment.');
+      ensure(patient.data.role === 'patient' && invoice.data.patientId === patientId && patient.data.activeVisitId === activeVisitId &&
+        invoice.data.status === 'unpaid', 'validation', 'Bed assignment requires an active visit with an unpaid invoice.');
+      requireNumber(bed.data.dailyRateMinor, 'dailyRateMinor', 0, 100_000_000_000, true);
+      const sessionId = `bed_${log.id}`;
+      writeRecord(transaction, bed.ref, { status: 'occupied', patientId, visitId: activeVisitId,
+        sessionId, assignedAt: serverTimestamp(), assignedBy: actor.id, rateAtAssignmentMinor: bed.data.dailyRateMinor }, actor, log, bed.data);
+      writeRecord(transaction, patient.ref, { currentBedId: bedId }, actor, log, patient.data);
+      transaction.update(refFor('visits', activeVisitId), { bedId, schemaVersion: 2, revision: increment(1),
+        updatedAt: serverTimestamp(), updatedBy: actor.id, lastAuditId: log.id });
+      audit({ patientId, visitId: activeVisitId, sessionId }); return { bedId, visitId: activeVisitId };
+    }),
+
+  releaseBed: bedId => hospital.transferBed(null, bedId, null),
+
+  transferBed: (patientId, fromBedId, toBedId) => mutation(['receptionist', 'admin'], 'BED_RELEASED', 'beds', fromBedId,
+    async (transaction, actor, log, audit) => {
+      const from = await readRequired(transaction, 'beds', fromBedId);
+      ensure(from.data.status === 'occupied', 'invalid-transition', 'Source bed is not occupied.');
+      const id = patientId || from.data.patientId;
+      ensure(from.data.patientId === id && fromBedId !== toBedId, 'validation', 'Invalid bed transfer.');
+      const patient = await readRequired(transaction, 'users', id);
+      const invoice = await readRequired(transaction, 'invoices', from.data.visitId);
+      const to = toBedId ? await readRequired(transaction, 'beds', toBedId) : null;
+      ensure(patient.data.currentBedId === fromBedId && patient.data.activeVisitId === from.data.visitId,
+        'conflict', 'Patient and bed linkage is inconsistent.');
+      ensure(!to || to.data.status === 'available', 'bed-unavailable', 'Target bed is not available.');
+      ensure(from.data.assignedAt instanceof Timestamp, 'validation', 'Bed admission time is missing.');
+      const days = Math.max(1, Math.ceil((Date.now() - from.data.assignedAt.toMillis()) / 86400000));
+      const line = invoiceLine(from.data.sessionId, `Bed — ${from.data.type}`, days,
+        from.data.rateAtAssignmentMinor, 'bed', fromBedId);
+      const update = appendLine(invoice.data, line);
+      if (to) requireNumber(to.data.dailyRateMinor, 'dailyRateMinor', 0, 100_000_000_000, true);
+      writeRecord(transaction, from.ref, { status: 'available', patientId: null, visitId: null,
+        sessionId: null, assignedAt: null, releasedAt: serverTimestamp() }, actor, log, from.data);
+      if (to) writeRecord(transaction, to.ref, { status: 'occupied', patientId: id, visitId: from.data.visitId,
+        sessionId: `bed_${log.id}`, assignedAt: serverTimestamp(), assignedBy: actor.id,
+        rateAtAssignmentMinor: to.data.dailyRateMinor }, actor, log, to.data);
+      writeRecord(transaction, patient.ref, { currentBedId: toBedId }, actor, log, patient.data);
+      transaction.update(refFor('visits', from.data.visitId), { bedId: toBedId, schemaVersion: 2, revision: increment(1),
+        updatedAt: serverTimestamp(), updatedBy: actor.id, lastAuditId: log.id });
+      writeRecord(transaction, invoice.ref, update, actor, log, invoice.data);
+      audit({ patientId: id, visitId: from.data.visitId, toBedId, days, amountMinor: line.amountMinor });
+      return { patientId: id, fromBedId, toBedId, days, amount: line.amountMinor / 100 };
+    }),
+
+  scheduleOperation: (visitId, serviceId, staffIds, inventoryUsage = [], requestId = `op_${crypto.randomUUID()}`) => mutation(['doctor'],
+    'OPERATION_SCHEDULED', 'operations', requestId, async (transaction, actor, log, audit) => {
+      const visit = await readRequired(transaction, 'visits', visitId); clinicalOwner(actor, visit.data);
+      ensure(visit.data.status === 'active' && visit.data.openOperations < 5, 'validation', 'Operation requires an active visit with fewer than five pending operations.');
+      const department = await readRequired(transaction, 'departments', visit.data.departmentId);
+      const service = department.data.services?.[requireId(serviceId)];
+      ensure(service?.active && service.type === 'operation', 'validation', 'Select an active operation service.');
+      ensure(Array.isArray(staffIds) && staffIds.length > 0 && staffIds.length <= 5 && new Set(staffIds).size === staffIds.length && staffIds.includes(actor.id),
+        'validation', 'Select 1–5 distinct staff, including the operating doctor.');
+      for (const id of staffIds) {
+        requireId(id);
+        const staff = department.data.staffProfiles?.[id];
+        ensure(staff?.active && ['doctor', 'lab', 'receptionist'].includes(staff.role), 'validation', 'Required staff must be active employees assigned to this department.');
+      }
+      ensure(Array.isArray(inventoryUsage) && inventoryUsage.length <= 5, 'validation', 'At most five distinct consumable inventory lines are supported per operation transaction.');
+      const ids = new Set();
+      const consumables = [];
+      for (const item of inventoryUsage) {
+        requireId(item.itemId); requireNumber(item.quantity, 'quantity', 1, 10000, true);
+        ensure(!ids.has(item.itemId), 'duplicate', 'Combine duplicate consumable lines.'); ids.add(item.itemId);
+        const inventory = await readRequired(transaction, 'inventory', item.itemId);
+        ensure(inventory.data.category !== 'equipment' && inventory.data.quantity >= item.quantity, 'insufficient-stock', 'Choose available consumables; reusable equipment must not be deducted.');
+        consumables.push({ itemId: item.itemId, name: inventory.data.name, quantity: item.quantity,
+          unitPriceMinor: inventory.data.priceMinor, amountMinor: item.quantity * inventory.data.priceMinor });
+      }
+      const operationRef = refFor('operations', requestId);
+      const existing = await transaction.get(operationRef);
+      ensure(!existing.exists(), 'duplicate', 'Operation request ID already exists.');
+      const operation = { visitId, patientId: visit.data.patientId, doctorId: actor.id, departmentId: visit.data.departmentId,
+        invoiceId: visit.data.invoiceId, serviceId, operationType: service.name, requiredStaff: staffIds,
+        inventoryUsage: consumables, chargeMinor: service.priceMinor,
+        inventoryCostMinor: consumables.reduce((sum, item) => sum + item.amountMinor, 0),
+        status: 'scheduled', locked: false, inventoryDeducted: false,
+        checklist: { staffConfirmed: false, equipmentConfirmed: false, consentConfirmed: false, riskAcknowledged: false } };
+      writeRecord(transaction, operationRef, operation, actor, log);
+      writeRecord(transaction, visit.ref, { openOperations: visit.data.openOperations + 1 }, actor, log, visit.data);
+      audit({ visitId }); return { id: requestId, ...operation };
+    }),
+
+  confirmChecklist: (operationId, checklistItem) => mutation(['doctor'], 'OPERATION_CHECKLIST_CONFIRMED', 'operations', operationId,
+    async (transaction, actor, log, audit) => {
+      ensure(['staffConfirmed', 'equipmentConfirmed', 'consentConfirmed', 'riskAcknowledged'].includes(checklistItem), 'validation', 'Invalid checklist item.');
+      const operation = await readRequired(transaction, 'operations', operationId);
+      ensure(operation.data.doctorId === actor.id && operation.data.status === 'scheduled' && !operation.data.locked,
+        'forbidden', 'Only the operating doctor can confirm the scheduled operation checklist.');
+      writeRecord(transaction, operation.ref, { checklist: { ...operation.data.checklist, [checklistItem]: true } }, actor, log, operation.data);
+      audit({ checklistItem }); return { id: operationId };
+    }),
+
+  startOperation: operationId => mutation(['doctor'], 'OPERATION_STARTED', 'operations', operationId,
+    async (transaction, actor, log, audit) => {
+      const operation = await readRequired(transaction, 'operations', operationId);
+      ensure(operation.data.doctorId === actor.id, 'forbidden', 'Only the operating doctor can start this operation.');
+      if (operation.data.status === 'in-progress' && operation.data.inventoryDeducted) return { id: operationId, alreadyCompleted: true };
+      ensure(operation.data.status === 'scheduled' && !operation.data.locked && !operation.data.inventoryDeducted, 'invalid-transition', 'Operation has already started or cannot start.');
+      ensure(['staffConfirmed', 'equipmentConfirmed', 'consentConfirmed', 'riskAcknowledged'].every(key => operation.data.checklist[key] === true),
+        'checklist-incomplete', 'Confirm all safety checklist items before starting.');
+      const visit = await readRequired(transaction, 'visits', operation.data.visitId); clinicalOwner(actor, visit.data);
+      const invoice = await readRequired(transaction, 'invoices', operation.data.invoiceId);
+      const inventoryRecords = [];
+      for (const item of operation.data.inventoryUsage) {
+        const inventory = await readRequired(transaction, 'inventory', item.itemId);
+        ensure(inventory.data.quantity >= item.quantity, 'insufficient-stock', `Insufficient stock for ${item.name}.`);
+        ensure(inventory.data.priceMinor === item.unitPriceMinor, 'price-changed', 'Inventory price changed. Reschedule with current pricing before starting.');
+        inventoryRecords.push({ ...inventory, item });
+      }
+      // All reads above, all writes below: Firestore forbids reads after writes.
+      const line = invoiceLine(operationId, `Operation — ${operation.data.operationType} (including consumables)`,
+        1, operation.data.chargeMinor + operation.data.inventoryCostMinor, 'operation', operationId);
+      const update = appendLine(invoice.data, line);
+      for (const inventory of inventoryRecords) writeRecord(transaction, inventory.ref, {
+        quantity: inventory.data.quantity - inventory.item.quantity,
+        usedQuantity: (inventory.data.usedQuantity || 0) + inventory.item.quantity,
+        usageValueMinor: (inventory.data.usageValueMinor || 0) + inventory.item.amountMinor,
+        lastOperationId: operationId, lowStock: inventory.data.quantity - inventory.item.quantity <= inventory.data.threshold,
+      }, actor, log, inventory.data);
+      writeRecord(transaction, invoice.ref, update, actor, log, invoice.data);
+      writeRecord(transaction, operation.ref, { status: 'in-progress', locked: true, inventoryDeducted: true, startedAt: serverTimestamp() }, actor, log, operation.data);
+      audit({ visitId: operation.data.visitId, inventoryUsage: operation.data.inventoryUsage, amountMinor: line.amountMinor });
+      return { id: operationId };
+    }),
+
+  completeOperation: (operationId, outcome) => mutation(['doctor'], 'OPERATION_COMPLETED', 'operations', operationId,
+    async (transaction, actor, log, audit) => {
+      const operation = await readRequired(transaction, 'operations', operationId);
+      ensure(operation.data.doctorId === actor.id && operation.data.status === 'in-progress' && operation.data.inventoryDeducted,
+        'invalid-transition', 'Only a started operation can be completed by its doctor.');
+      const visit = await readRequired(transaction, 'visits', operation.data.visitId);
+      ensure(visit.data.openOperations > 0 && !visit.data.locked, 'conflict', 'Operation and visit linkage is inconsistent.');
+      writeRecord(transaction, operation.ref, { status: 'completed', locked: true,
+        outcome: requireText(outcome, 'outcome', 6000), completedAt: serverTimestamp() }, actor, log, operation.data);
+      writeRecord(transaction, visit.ref, { openOperations: visit.data.openOperations - 1 }, actor, log, visit.data);
+      audit({ visitId: operation.data.visitId }); return { id: operationId };
+    }),
+
+  markAttendance: (userId, date, status, reason = '') => mutation(['receptionist', 'admin'], 'ATTENDANCE_MARKED', 'attendance', `${userId}_${date}`,
+    async (transaction, actor, log, audit) => {
+      requireDate(date); ensure(date <= hospitalDate(), 'validation', 'Cannot mark future attendance.');
+      ensure(['present', 'absent', 'late', 'half-day', 'leave'].includes(status), 'validation', 'Invalid attendance status.');
+      requireId(userId);
+      // Reception must not read staff salaries/private profiles. Rules verify
+      // staff membership and employment dates from the protected user record.
+      const month = Number(date.slice(5, 7)); const year = Number(date.slice(0, 4));
+      const lockSnapshot = await transaction.get(refFor('attendance', `${salaryIdFor(userId, month, year)}_lock`));
+      ensure(!lockSnapshot.exists(), 'payroll-locked', 'Attendance is frozen because this month’s salary has been finalized.');
+      const attendanceRef = refFor('attendance', `${userId}_${date}`);
+      const existing = await transaction.get(attendanceRef);
+      if (existing.exists()) requireText(reason, 'attendance correction reason', 1000);
+      writeRecord(transaction, attendanceRef, { kind: 'daily', userId, date, status, markedBy: actor.id,
+        markedAt: serverTimestamp(), correctionReason: requireText(reason, 'reason', 1000, true) }, actor, log, existing.exists() ? existing.data() : null);
+      audit({ userId, date, status, previousStatus: existing.exists() ? existing.data().status : null }); return { userId, date, status };
+    }),
+
+  calculateSalary: (userId, month, year) => mutation(['admin'], 'SALARY_CALCULATED', 'salaryRecords', salaryIdFor(userId, month, year),
+    async (transaction, actor, log, audit) => {
+      const dates = monthDates(month, year);
+      const user = await readRequired(transaction, 'users', userId);
+      ensure(['doctor', 'lab', 'receptionist'].includes(user.data.role), 'validation', 'Select hospital staff.');
+      const salaryRef = refFor('salaryRecords', salaryIdFor(userId, month, year));
+      const existing = await transaction.get(salaryRef);
+      if (existing.exists()) return { ...normalized(existing.data()), id: salaryRef.id, alreadyCompleted: true };
+      const payrollLockRef = refFor('attendance', `${salaryRef.id}_lock`);
+      const payrollLock = await transaction.get(payrollLockRef);
+      ensure(!payrollLock.exists(), 'conflict', 'Payroll is locked without a corresponding salary record. Contact support.');
+      // Explicit deterministic document reads participate in the transaction;
+      // getDocs(query(...)) inside a transaction does NOT provide isolation.
+      const attendance = await Promise.all(dates.map(date => transaction.get(refFor('attendance', `${userId}_${date}`))));
+      const calculation = salaryCalculation(user.data, attendance.filter(snapshot => snapshot.exists()).map(snapshot => snapshot.data()), month, year);
+      const salary = { ...calculation, userId, userName: user.data.fullName, userRole: user.data.role,
+        departmentId: user.data.departmentId || null, userDepartment: user.data.department || '', month, year,
+        status: 'pending', locked: false, calculatedBy: actor.id, calculatedAt: serverTimestamp(),
+        paidAt: null, paidBy: null, paymentMethod: null, paymentReference: null,
+        payrollPolicy: user.data.payrollPolicy, salaryPdf: null };
+      writeRecord(transaction, salaryRef, salary, actor, log);
+      writeRecord(transaction, payrollLockRef, { kind: 'payroll-lock', userId,
+        period: `${year}-${String(month).padStart(2, '0')}`, salaryId: salaryRef.id, locked: true }, actor, log);
+      audit({ userId, month, year, netSalaryMinor: calculation.netSalaryMinor, policyVersion: calculation.policyVersion });
+      return { ...salary, id: salaryRef.id };
+    }),
+
+  paySalaries: (records, payment) => resultOf(async () => {
+    ensure(Array.isArray(records) && records.length > 0 && records.length <= 8, 'validation', 'Pay 1–8 salary records atomically per transaction.');
+    const ids = records.map(record => requireId(typeof record === 'string' ? record : record.id));
+    ensure(new Set(ids).size === ids.length, 'duplicate', 'Duplicate salary record.');
+    ensure(['cash', 'bank_transfer'].includes(payment?.method), 'validation', 'Record the actual salary payment method.');
+    const reference = requireText(payment.reference, 'paymentReference', 150);
+    const log = auditRef();
+    return runTransaction(db, async transaction => {
+      const actor = await actorIn(transaction, ['admin']);
+      const salaries = await Promise.all(ids.map(id => readRequired(transaction, 'salaryRecords', id)));
+      for (const salary of salaries) ensure(salary.data.status === 'pending' && !salary.data.locked,
+        'salary-paid', 'At least one salary is already paid or locked. Nothing was changed.');
+      for (const salary of salaries) writeRecord(transaction, salary.ref, { status: 'paid', locked: true,
+        paidAt: serverTimestamp(), paidBy: actor.id, paymentMethod: payment.method, paymentReference: reference }, actor, log, salary.data);
+      recordAudit(transaction, log, actor, 'SALARY_PAID', 'salaryRecords', ids[0], {
+        salaryIds: ids, totalMinor: salaries.reduce((sum, salary) => sum + salary.data.netSalaryMinor, 0), reference });
+      return { salaryIds: ids };
+    });
+  }),
+
+  saveSalaryPdf: (salaryId, attachment) => mutation(['admin'], 'SALARY_PDF_GENERATED', 'salaryRecords', salaryId,
+    async (transaction, actor, log, audit) => {
+      validateAttachment(attachment); ensure(attachment.mimeType === 'application/pdf', 'validation', 'Salary slip must be a PDF.');
+      const salary = await readRequired(transaction, 'salaryRecords', salaryId);
+      ensure(salary.data.status === 'paid', 'salary-unpaid', 'A final salary slip can be attached only after actual payout.');
+      // Paid financial fields remain immutable; a derived PDF may be attached once.
+      ensure(!salary.data.salaryPdf, 'duplicate', 'A salary PDF has already been attached.');
+      writeRecord(transaction, salary.ref, { salaryPdf: attachment }, actor, log, salary.data);
+      audit({ checksum: attachment.sha256 }); return { id: salaryId };
+    }),
+
+  setTriage: (appointmentId, classification, assessment) => mutation(['receptionist', 'admin'], 'TRIAGE_CLASSIFIED', 'appointments', appointmentId,
+    async (transaction, actor, log, audit) => {
+      ensure(['red', 'yellow', 'green'].includes(classification), 'validation', 'Choose red, yellow or green triage.');
+      const appointment = await readRequired(transaction, 'appointments', appointmentId);
+      ensure(appointment.data.isEmergency && ['scheduled', 'confirmed', 'checked-in', 'in-progress'].includes(appointment.data.status),
+        'validation', 'Triage classification requires an active emergency appointment.');
+      writeRecord(transaction, appointment.ref, { triage: classification, triagePriority: { red: 0, yellow: 1, green: 2 }[classification],
+        triageAssessment: requireText(assessment, 'triageAssessment', 2000), triagedAt: serverTimestamp() }, actor, log, appointment.data);
+      audit({ classification }); return { id: appointmentId };
+    }),
+
+  sendMessage: (chatId, input, requestId = `msg_${crypto.randomUUID()}`) => mutation(['patient', 'doctor'], 'CHAT_MESSAGE_SENT', 'messages', requestId,
+    async (transaction, actor, log, audit) => {
+      const chat = await readRequired(transaction, 'chats', chatId);
+      ensure(chat.data.participants.includes(actor.id), 'forbidden', 'You are not a chat participant.');
+      const text = requireText(input.text || '', 'message', 4000, true);
+      const file = input.file || null; if (file) validateAttachment(file);
+      ensure(text || file, 'validation', 'Enter a message or attach a file.');
+      const messageRef = refFor('messages', requestId);
+      const existing = await transaction.get(messageRef);
+      if (existing.exists()) {
+        ensure(existing.data().senderId === actor.id && existing.data().chatId === chatId && existing.data().text === text,
+          'duplicate', 'Message request ID already belongs to another message.');
+        return { ...normalized(existing.data()), id: requestId, alreadyCompleted: true };
+      }
+      const recipientId = chat.data.participants.find(id => id !== actor.id);
+      const message = { chatId, senderId: actor.id, recipientId, text, file, status: 'sent',
+        sequence: chat.data.sequence + 1, timestamp: serverTimestamp(), deliveredAt: null, seenAt: null };
+      writeRecord(transaction, messageRef, message, actor, log);
+      writeRecord(transaction, chat.ref, { sequence: message.sequence,
+        lastMessage: { id: requestId, text: text.slice(0, 200), senderId: actor.id, sequence: message.sequence },
+        lastMessageAt: serverTimestamp(), unreadCount: { ...chat.data.unreadCount,
+          [recipientId]: chat.data.unreadCount[recipientId] + 1 } }, actor, log, chat.data);
+      audit({ chatId }); return { ...message, id: requestId };
+    }),
+
+  acknowledgeMessages: (chatId, messageIds, status = 'seen') => mutation(['doctor', 'patient'], 'CHAT_MESSAGES_READ', 'chats', chatId,
+    async (transaction, actor, log, audit) => {
+      ensure(['delivered', 'seen'].includes(status), 'validation', 'Invalid read receipt status.');
+      ensure(Array.isArray(messageIds) && messageIds.length > 0 && messageIds.length <= 8 && new Set(messageIds).size === messageIds.length,
+        'validation', 'Acknowledge 1–8 distinct messages at a time.');
+      const chat = await readRequired(transaction, 'chats', chatId);
+      ensure(chat.data.participants.includes(actor.id), 'forbidden', 'You are not a chat participant.');
+      const messages = await Promise.all(messageIds.map(id => readRequired(transaction, 'messages', id)));
+      for (const message of messages) ensure(message.data.chatId === chatId && message.data.recipientId === actor.id,
+        'forbidden', 'You can only acknowledge messages sent to you.');
+      let newlySeen = 0;
+      for (const message of messages) {
+        if (message.data.status === 'seen' || message.data.status === status) continue;
+        if (status === 'seen') newlySeen++;
+        writeRecord(transaction, message.ref, { status, deliveredAt: message.data.deliveredAt || serverTimestamp(),
+          ...(status === 'seen' ? { seenAt: serverTimestamp() } : {}) }, actor, log, message.data);
+      }
+      if (newlySeen) writeRecord(transaction, chat.ref, { unreadCount: { ...chat.data.unreadCount,
+        [actor.id]: Math.max(0, chat.data.unreadCount[actor.id] - newlySeen) } }, actor, log, chat.data);
+      audit({ messageIds, status }); return { chatId, newlySeen };
+    }),
+
+  rateVisit: (visitId, stars, review = '') => mutation(['patient'], 'DOCTOR_RATED', 'ratings', visitId,
+    async (transaction, actor, log, audit) => {
+      requireNumber(stars, 'rating', 1, 5, true);
+      const visit = await readRequired(transaction, 'visits', visitId);
+      ensure(visit.data.patientId === actor.id && visit.data.status === 'discharged', 'forbidden', 'Rate only your completed visit.');
+      const ratingRef = refFor('ratings', visitId);
+      const existing = await transaction.get(ratingRef); ensure(!existing.exists(), 'duplicate', 'This visit has already been rated.');
+      const rating = { visitId, patientId: actor.id, doctorId: visit.data.doctorId,
+        rating: stars, review: requireText(review, 'review', 2000, true) };
+      writeRecord(transaction, ratingRef, rating, actor, log); audit({ visitId }); return { id: visitId, ...rating };
+    }),
+
+  updateProfile: (userId, input) => mutation(['patient', 'doctor', 'receptionist', 'lab', 'admin'], 'PROFILE_UPDATED', 'users', userId,
+    async (transaction, actor, log, audit) => {
+      ensure(actor.id === userId || ['receptionist', 'admin'].includes(actor.role), 'forbidden', 'You cannot edit this profile.');
+      const user = await readRequired(transaction, 'users', userId);
+      ensure(actor.id === userId || user.data.role === 'patient', 'forbidden', 'Use staff administration to edit staff.');
+      const allowed = ['fullName', 'phone', 'cnic', 'dateOfBirth', 'gender', 'address', 'emergencyContact', 'bloodGroup'];
+      ensure(Object.keys(input).every(key => allowed.includes(key)), 'validation', 'Profile updates cannot change roles, salary, email or account status.');
+      const fields = {};
+      for (const [key, value] of Object.entries(input)) fields[key] = requireText(value, key, key === 'address' ? 500 : 150, true);
+      if (fields.fullName != null) requireText(fields.fullName, 'fullName', 100);
+      if (fields.phone) ensure(/^\+923\d{9}$/.test(fields.phone), 'validation', 'Use Pakistan mobile E.164 format: +923XXXXXXXXX.');
+      if (fields.emergencyContact) ensure(/^\+923\d{9}$/.test(fields.emergencyContact), 'validation', 'Emergency contact must be a Pakistan mobile number.');
+      if (fields.cnic) ensure(/^\d{5}-\d{7}-\d$/.test(fields.cnic), 'validation', 'Invalid CNIC format.');
+      if (fields.dateOfBirth) { requireDate(fields.dateOfBirth); ensure(fields.dateOfBirth <= hospitalDate(), 'validation', 'Date of birth cannot be in the future.'); }
+      if (fields.gender) ensure(['male', 'female', 'other'].includes(fields.gender), 'validation', 'Invalid gender.');
+      if (fields.bloodGroup) ensure(['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].includes(fields.bloodGroup), 'validation', 'Invalid blood group.');
+      writeRecord(transaction, user.ref, fields, actor, log, user.data); audit({ fields: Object.keys(fields) }); return { id: userId };
+    }),
+
+  setStaffStatus: (userId, status, reason) => mutation(['admin'], 'STAFF_STATUS_CHANGED', 'users', userId,
+    async (transaction, actor, log, audit) => {
+      ensure(['active', 'disabled'].includes(status), 'validation', 'Invalid account status.');
+      const user = await readRequired(transaction, 'users', userId);
+      ensure(['doctor', 'receptionist', 'lab'].includes(user.data.role), 'forbidden', 'Patients and the sole administrator cannot be disabled through staff management.');
+      const department = user.data.departmentId ? await readRequired(transaction, 'departments', user.data.departmentId) : null;
+      writeRecord(transaction, user.ref, { accountStatus: status, statusReason: requireText(reason, 'reason', 1000) }, actor, log, user.data);
+      if (department) writeRecord(transaction, department.ref, {
+        staffProfiles: { ...department.data.staffProfiles, [userId]: { ...department.data.staffProfiles[userId], active: status === 'active' } },
+        ...(user.data.role === 'doctor' ? { doctorProfiles: { ...department.data.doctorProfiles,
+          [userId]: { ...department.data.doctorProfiles[userId], active: status === 'active' } } } : {}),
+      }, actor, log, department.data);
+      audit({ userId, status }); return { id: userId };
+    }),
+
+  restockInventory: (itemId, quantity, reason) => mutation(['admin'], 'INVENTORY_RESTOCKED', 'inventory', itemId,
+    async (transaction, actor, log, audit) => {
+      requireNumber(quantity, 'quantity', 1, 1_000_000, true);
+      const inventory = await readRequired(transaction, 'inventory', itemId);
+      const newQuantity = requireNumber(inventory.data.quantity + quantity, 'newQuantity', 0, 1_000_000_000, true);
+      const costMinor = quantity * inventory.data.priceMinor;
+      writeRecord(transaction, inventory.ref, { quantity: newQuantity, lowStock: newQuantity <= inventory.data.threshold,
+        purchasedQuantity: (inventory.data.purchasedQuantity || 0) + quantity,
+        purchaseValueMinor: (inventory.data.purchaseValueMinor || 0) + costMinor }, actor, log, inventory.data);
+      audit({ quantity, costMinor, reason: requireText(reason, 'reason', 1000) }); return { id: itemId, quantity: newQuantity };
+    }),
+};
+
+Object.assign(hospital, {
+  createProfile: (authUser, input, staffCreatedBy = null) => resultOf(async () => {
+    requireId(authUser.uid, 'uid');
+    const current = auth.currentUser;
+    ensure(current, 'unauthenticated', 'Please sign in.');
+    const isSelf = current.uid === authUser.uid;
+    ensure(isSelf || staffCreatedBy === current.uid, 'forbidden', 'Invalid profile creator.');
+    const role = isSelf ? 'patient' : input.role;
+    ensure(['patient', 'doctor', 'receptionist', 'lab'].includes(role), 'forbidden', 'Administrator accounts cannot be created from the application.');
+    ensure(!isSelf || !input.role || input.role === 'patient', 'forbidden', 'Only patients may self-register.');
+    const profile = {
+      uid: authUser.uid, email: authUser.email || null, role, fullName: requireText(input.fullName, 'fullName', 100),
+      phone: input.phone ? `+${String(input.phone).replace(/\D/g, '').replace(/^0(?=3)/, '92')}` : '',
+      cnic: input.cnic || '', dateOfBirth: input.dateOfBirth || '', gender: input.gender || '',
+      address: requireText(input.address || '', 'address', 500, true), emergencyContact: input.emergencyContact ?
+        `+${String(input.emergencyContact).replace(/\D/g, '').replace(/^0(?=3)/, '92')}` : '',
+      bloodGroup: input.bloodGroup || '', accountStatus: 'active', activeVisitId: null, currentBedId: null, careTeamIds: [],
+      departmentId: role === 'patient' ? null : input.departmentId || input.department || null, department: '',
+      specialization: requireText(input.specialization || '', 'specialization', 150, true),
+      licenseNumber: requireText(input.licenseNumber || '', 'licenseNumber', 100, true),
+      baseSalaryMinor: role !== 'patient' ? moneyToMinor(Number(input.baseSalary || 0)) : 0,
+      employmentStartDate: input.employmentStartDate || null, employmentEndDate: null,
+      payrollPolicy: role === 'patient' ? null : validatePayrollPolicy(input.payrollPolicy || DEFAULT_PAYROLL_POLICY),
+    };
+    if (profile.phone) ensure(/^\+923\d{9}$/.test(profile.phone), 'validation', 'Enter a valid Pakistan mobile number.');
+    if (profile.emergencyContact) ensure(/^\+923\d{9}$/.test(profile.emergencyContact), 'validation', 'Enter a valid emergency contact.');
+    if (profile.cnic) ensure(/^\d{5}-\d{7}-\d$/.test(profile.cnic), 'validation', 'Invalid CNIC format.');
+    if (profile.dateOfBirth) { requireDate(profile.dateOfBirth); ensure(profile.dateOfBirth <= hospitalDate(), 'validation', 'Date of birth cannot be in the future.'); }
+    if (profile.gender) ensure(['male', 'female', 'other'].includes(profile.gender), 'validation', 'Invalid gender.');
+    if (profile.bloodGroup) ensure(['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'].includes(profile.bloodGroup), 'validation', 'Invalid blood group.');
+    if (role !== 'patient') requireDate(profile.employmentStartDate, 'employmentStartDate');
+    const log = auditRef();
+    return runTransaction(db, async transaction => {
+      const actor = isSelf ? { id: current.uid, role: 'patient' } : await actorIn(transaction, ['admin', 'receptionist']);
+      ensure(actor.role !== 'receptionist' || role === 'patient', 'forbidden', 'Reception can register only patients.');
+      const userRef = refFor('users', authUser.uid);
+      const existing = await transaction.get(userRef);
+      ensure(!existing.exists(), 'profile-exists', 'A profile already exists; registration will not overwrite it.');
+      const department = role !== 'patient' && profile.departmentId ? await readRequired(transaction, 'departments', profile.departmentId) : null;
+      if (role !== 'patient') ensure(department?.data.active, 'validation', 'Select an active department.');
+      if (department) profile.department = department.data.name;
+      let doctorProfile = null;
+      if (role === 'doctor') {
+        requireText(profile.specialization, 'specialization', 150); requireText(profile.licenseNumber, 'licenseNumber', 100);
+        const schedule = input.schedule || { weekdays: [], times: [], closedDates: [] };
+        ensure(Array.isArray(schedule.weekdays) && Array.isArray(schedule.times) && schedule.times.length <= 48,
+          'validation', 'Invalid doctor schedule.');
+        for (const time of schedule.times) appointmentInstant(hospitalDate(), time);
+        doctorProfile = { fullName: profile.fullName, specialization: profile.specialization,
+          consultationFeeMinor: moneyToMinor(Number(input.consultationFee || 0)), active: true, schedule };
+      }
+      writeRecord(transaction, userRef, profile, actor, log);
+      if (department) writeRecord(transaction, department.ref, {
+        staffProfiles: { ...(department.data.staffProfiles || {}), [authUser.uid]: { fullName: profile.fullName, role, active: true } },
+        ...(doctorProfile ? { doctorIds: [...department.data.doctorIds, authUser.uid],
+          doctorProfiles: { ...department.data.doctorProfiles, [authUser.uid]: doctorProfile } } : {}),
+      }, actor, log, department.data);
+      recordAudit(transaction, log, actor, isSelf ? 'USER_REGISTERED' : 'STAFF_CREATED', 'users', authUser.uid, { role });
+      return { ...profile, id: authUser.uid };
+    });
+  }),
+
+  recordAuthEvent: action => resultOf(async () => {
+    ensure(['USER_LOGIN', 'USER_LOGOUT'].includes(action), 'validation', 'Invalid authentication event.');
+    const current = auth.currentUser; ensure(current, 'unauthenticated', 'No signed-in user.');
+    const log = auditRef();
+    const userRef = refFor('users', current.uid);
+    const batch = writeBatch(db);
+    batch.set(log, { schemaVersion: 2, actorId: current.uid, userId: current.uid, action,
+      targetCollection: 'users', targetId: current.uid, timestamp: serverTimestamp(),
+      details: { userAgent: navigator.userAgent.slice(0, 500), platform: navigator.userAgentData?.platform || navigator.platform || '',
+        ipAddress: null, ipSource: 'unavailable-client-only' } });
+    if (action === 'USER_LOGIN') batch.update(userRef, { lastLogin: serverTimestamp() });
+    await batch.commit(); return { id: log.id };
+  }),
+
+  subscribeProfile: (uid, onData, onError) => onSnapshot(refFor('users', uid), snapshot =>
+    onData(snapshot.exists() ? rowFrom(snapshot) : null), onError),
+
+  createDepartment: input => mutation(['admin'], 'DEPARTMENT_CREATED', 'departments', input.id,
+    async (transaction, actor, log, audit) => {
+      const ref = refFor('departments', input.id);
+      const existing = await transaction.get(ref); ensure(!existing.exists(), 'duplicate', 'Department already exists.');
+      const department = { name: requireText(input.name, 'name', 100), active: true, emergencyEnabled: Boolean(input.emergencyEnabled),
+        headDoctorId: null, doctorIds: [], doctorProfiles: {}, staffProfiles: {}, services: {}, revenueMinor: 0,
+        revenue: 0, collectedRevenue: 0, lastPaidInvoiceId: null };
+      writeRecord(transaction, ref, department, actor, log); audit(); return { id: ref.id, ...department };
+    }),
+
+  configureService: (departmentId, serviceId, input) => mutation(['admin'], 'DEPARTMENT_SERVICE_UPDATED', 'departments', departmentId,
+    async (transaction, actor, log, audit) => {
+      requireId(serviceId); ensure(['lab', 'operation', 'consultation'].includes(input.type), 'validation', 'Invalid service type.');
+      const department = await readRequired(transaction, 'departments', departmentId);
+      ensure(Object.keys(department.data.services).length < 100 || Object.hasOwn(department.data.services, serviceId), 'limit-exceeded', 'At most 100 services per department.');
+      const service = { name: requireText(input.name, 'service name', 150), type: input.type,
+        priceMinor: moneyToMinor(input.price), active: input.active !== false };
+      writeRecord(transaction, department.ref, { services: { ...department.data.services, [serviceId]: service } }, actor, log, department.data);
+      audit({ serviceId }); return { serviceId };
+    }),
+
+  configureDoctor: (departmentId, doctorId, input) => mutation(['admin'], 'DOCTOR_SCHEDULE_UPDATED', 'departments', departmentId,
+    async (transaction, actor, log, audit) => {
+      const department = await readRequired(transaction, 'departments', departmentId);
+      const doctor = await readRequired(transaction, 'users', doctorId);
+      ensure(doctor.data.role === 'doctor' && doctor.data.departmentId === departmentId, 'validation', 'Doctor must belong to this department.');
+      const schedule = input.schedule;
+      ensure(schedule && Array.isArray(schedule.times) && schedule.times.length <= 48 &&
+        new Set(schedule.times).size === schedule.times.length && Array.isArray(schedule.weekdays) &&
+        schedule.weekdays.length > 0 && schedule.weekdays.every(day => Number.isInteger(day) && day >= 0 && day <= 6),
+        'validation', 'Configure distinct appointment slots and working weekdays.');
+      for (const time of schedule.times) appointmentInstant(hospitalDate(), time);
+      ensure(Array.isArray(schedule.closedDates || []) && (schedule.closedDates || []).length <= 60, 'validation', 'At most 60 schedule exceptions.');
+      for (const date of schedule.closedDates || []) requireDate(date);
+      const projection = { fullName: doctor.data.fullName, specialization: doctor.data.specialization,
+        active: doctor.data.accountStatus === 'active', consultationFeeMinor: moneyToMinor(input.consultationFee),
+        schedule: { weekdays: [...new Set(schedule.weekdays)], times: [...schedule.times].sort(), closedDates: schedule.closedDates || [] } };
+      writeRecord(transaction, department.ref, { doctorProfiles: { ...department.data.doctorProfiles, [doctorId]: projection },
+        ...(input.isHeadDoctor === true ? { headDoctorId: doctorId } : {}) }, actor, log, department.data);
+      audit({ doctorId }); return { doctorId };
+    }),
+
+  configurePayroll: (userId, input) => mutation(['admin'], 'PAYROLL_POLICY_UPDATED', 'users', userId,
+    async (transaction, actor, log, audit) => {
+      const user = await readRequired(transaction, 'users', userId);
+      ensure(['doctor', 'receptionist', 'lab'].includes(user.data.role), 'validation', 'Select staff.');
+      const policy = input.policy;
+      const payrollPolicy = validatePayrollPolicy({ ...policy, divisor: 26, version: (user.data.payrollPolicy?.version || 0) + 1 });
+      const baseSalaryMinor = moneyToMinor(input.baseSalary);
+      ensure(baseSalaryMinor > 0, 'validation', 'Base salary must be greater than zero.');
+      writeRecord(transaction, user.ref, { payrollPolicy, baseSalaryMinor }, actor, log, user.data);
+      audit({ policyVersion: payrollPolicy.version }); return { userId };
+    }),
+
+  createBed: input => mutation(['admin'], 'BED_CREATED', 'beds', input.id,
+    async (transaction, actor, log, audit) => {
+      ensure(['ICU', 'General', 'Emergency', 'Isolation', 'CCU', 'NICU', 'PICU'].includes(input.type), 'validation', 'Invalid bed type.');
+      const ref = refFor('beds', input.id); const existing = await transaction.get(ref);
+      ensure(!existing.exists(), 'duplicate', 'Bed ID already exists.');
+      const bed = { type: input.type, label: requireText(input.label || input.id, 'label', 100), status: 'available',
+        patientId: null, visitId: null, sessionId: null, assignedAt: null, rateAtAssignmentMinor: null,
+        dailyRateMinor: moneyToMinor(input.dailyRate), dailyRate: input.dailyRate };
+      writeRecord(transaction, ref, bed, actor, log); audit(); return { id: ref.id, ...bed };
+    }),
+
+  createInventory: input => mutation(['admin'], 'INVENTORY_CREATED', 'inventory', input.id,
+    async (transaction, actor, log, audit) => {
+      const ref = refFor('inventory', input.id); const existing = await transaction.get(ref);
+      ensure(!existing.exists(), 'duplicate', 'Inventory item already exists.');
+      const quantity = requireNumber(input.quantity, 'quantity', 0, 1_000_000_000, true);
+      const threshold = requireNumber(input.threshold, 'threshold', 0, 1_000_000_000, true);
+      const priceMinor = moneyToMinor(input.price);
+      ensure(['medicine', 'equipment', 'supply', 'surgical', 'lab', 'ppe'].includes(input.category), 'validation', 'Invalid inventory category.');
+      const item = { name: requireText(input.name, 'name', 150), category: input.category, unit: requireText(input.unit, 'unit', 50),
+        quantity, threshold, priceMinor, price: input.price, usedQuantity: 0, usageValueMinor: 0,
+        purchasedQuantity: quantity, purchaseValueMinor: quantity * priceMinor, lowStock: quantity <= threshold, lastOperationId: null };
+      writeRecord(transaction, ref, item, actor, log); audit({ quantity, costMinor: quantity * priceMinor }); return { id: ref.id, ...item };
+    }),
+
+  cancelLabTest: (requestId, reason) => mutation(['doctor'], 'LAB_REQUEST_CANCELLED', 'labRequests', requestId,
+    async (transaction, actor, log, audit) => {
+      const request = await readRequired(transaction, 'labRequests', requestId);
+      ensure(request.data.doctorId === actor.id && request.data.status === 'pending', 'invalid-transition', 'Only pending lab requests can be cancelled by the requesting doctor.');
+      const visit = await readRequired(transaction, 'visits', request.data.visitId); clinicalOwner(actor, visit.data);
+      const invoice = await readRequired(transaction, 'invoices', request.data.invoiceId);
+      ensure(invoice.data.status === 'unpaid' && !invoice.data.locked, 'invoice-locked', 'An invoice with submitted or paid proof cannot be changed.');
+      const items = invoice.data.items.filter(item => item.sourceId !== requestId);
+      ensure(items.length === invoice.data.items.length - 1 && visit.data.openLabRequests > 0, 'conflict', 'Lab charge linkage is inconsistent.');
+      writeRecord(transaction, request.ref, { status: 'cancelled', cancellationReason: requireText(reason, 'reason', 1000) }, actor, log, request.data);
+      writeRecord(transaction, visit.ref, { openLabRequests: visit.data.openLabRequests - 1 }, actor, log, visit.data);
+      writeRecord(transaction, invoice.ref, { items, ...invoiceTotals(items, invoice.data.taxBasisPoints), cancelledLabRequestId: requestId }, actor, log, invoice.data);
+      audit({ visitId: request.data.visitId }); return { id: requestId };
+    }),
+
+  cancelOperation: (operationId, reason) => mutation(['doctor'], 'OPERATION_CANCELLED', 'operations', operationId,
+    async (transaction, actor, log, audit) => {
+      const operation = await readRequired(transaction, 'operations', operationId);
+      ensure(operation.data.doctorId === actor.id && operation.data.status === 'scheduled' && !operation.data.inventoryDeducted,
+        'invalid-transition', 'Only scheduled operations can be cancelled; started operations require a documented clinical outcome.');
+      const visit = await readRequired(transaction, 'visits', operation.data.visitId); clinicalOwner(actor, visit.data);
+      ensure(visit.data.openOperations > 0, 'conflict', 'Operation count is inconsistent.');
+      writeRecord(transaction, operation.ref, { status: 'cancelled', locked: true, cancellationReason: requireText(reason, 'reason', 1000) }, actor, log, operation.data);
+      writeRecord(transaction, visit.ref, { openOperations: visit.data.openOperations - 1 }, actor, log, visit.data);
+      audit({ visitId: operation.data.visitId }); return { id: operationId };
+    }),
+});
+
+return Object.freeze(hospital);
+};
+
+export const hospital = createHospitalDatabase({ auth, db });
 
 // ==================== USER MANAGEMENT ====================
 export const getUserById = async (userId) => {

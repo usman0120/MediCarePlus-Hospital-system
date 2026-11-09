@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test tests/workflows.test.mjs",
+    "test:rules": "firebase emulators:exec --only firestore,auth --project demo-medicare-foundation \"node --test --test-concurrency=1 tests/firestore.test.mjs tests/database.test.mjs\"",
+    "firebase:reset": "node scripts/reset-firebase.mjs"
   },
   "dependencies": {
     "@emailjs/browser": "^4.4.1",
@@ -36,6 +39,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@firebase/rules-unit-testing": "^5.0.2",
     "@types/crypto-js": "^4.2.2",
     "@types/node": "^25.4.0",
     "@types/react": "^19.2.7",
@@ -45,6 +49,7 @@
     "eslint": "^9.39.1",
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
+    "firebase-admin": "^14.5.0",
     "globals": "^16.5.0",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.19",

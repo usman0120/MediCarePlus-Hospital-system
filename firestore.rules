@@ -1,30 +1,637 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Allow public read/write for development (TEMPORARY - CHANGE FOR PRODUCTION)
-    match /{document=**} {
-      allow read, write: if true;
+    function signedIn() { return request.auth != null; }
+    function userPath(id) { return /databases/$(database)/documents/users/$(id); }
+    function dataPath(name, id) { return /databases/$(database)/documents/$(name)/$(id); }
+    function me() { return get(userPath(request.auth.uid)).data; }
+    function active() {
+      let profile = signedIn() ? me() : null;
+      return signedIn() && request.auth.token.email_verified == true &&
+        profile.schemaVersion == 2 && profile.accountStatus == 'active';
     }
+    function role(value) { return active() && me().role == value; }
+    // A browser flag or simulated OTP is NOT MFA. Identity Platform must issue
+    // a second-factor claim before privileged administrator actions are allowed.
+    function admin() {
+      return role('admin') && request.auth.token.firebase.get('sign_in_second_factor', '') == 'totp' &&
+        request.auth.token.firebase.sign_in_provider == 'password';
+    }
+    function reception() { return role('receptionist') || admin(); }
+    function staff() { return active() && me().role in ['doctor', 'receptionist', 'lab'] || admin(); }
+    function bounded() { return request.query.limit != null && request.query.limit <= 100; }
+    function text(value, maximum) { return value is string && value.size() <= maximum; }
+    function id(value) { return value is string && value.matches('^[A-Za-z0-9_-]{1,128}$'); }
+    function minor(value) { return value is int && value >= 0 && value <= 100000000000; }
+    function date(value) { return value is string && value.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'); }
+    function file(value) {
+      return value is map && value.keys().hasOnly(['name', 'mimeType', 'encoding', 'originalBytes', 'base64', 'sha256']) &&
+        text(value.name, 150) && value.name.size() > 0 && value.encoding == 'gzip-base64' &&
+        value.mimeType in ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'] &&
+        value.originalBytes is int && value.originalBytes > 0 && value.originalBytes <= 5000000 &&
+        value.base64 is string && value.base64.size() > 0 && value.base64.size() <= 600000 &&
+        value.base64.matches('^[A-Za-z0-9+/]+={0,2}$') && value.sha256 is string && value.sha256.matches('^[a-f0-9]{64}$');
+    }
+    function audit(d, actions) {
+      let log = getAfter(dataPath('auditLogs', d.lastAuditId)).data;
+      return id(d.lastAuditId) && log.schemaVersion == 2 && log.actorId == request.auth.uid &&
+        log.timestamp == request.time && log.action in actions;
+    }
+    function createStamp(d) {
+      return d.schemaVersion == 2 && d.revision == 1 && d.createdAt == request.time &&
+        d.updatedAt == request.time && d.createdBy == request.auth.uid && d.updatedBy == request.auth.uid;
+    }
+    function updateStamp(d) {
+      return d.get('schemaVersion', 0) == 2 && d.get('revision', 0) == resource.data.get('revision', 0) + 1 &&
+        d.updatedAt == request.time && d.updatedBy == request.auth.uid &&
+        d.createdAt == resource.data.createdAt && d.createdBy == resource.data.createdBy;
+    }
+    function changedOnly(fields) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+        fields.concat(['revision', 'updatedAt', 'updatedBy', 'lastAuditId', 'schemaVersion']));
+    }
+    function owns(d) { return signedIn() && d.patientId == request.auth.uid; }
+    function treating(d) { return role('doctor') && d.doctorId == request.auth.uid; }
+    function clinicalRead(d) { return active() && (owns(d) || treating(d) || admin()); }
+    function activeVisit(id) {
+      let visit = get(dataPath('visits', id)).data;
+      return visit.status == 'active' && visit.locked == false && visit.doctorId == request.auth.uid;
+    }
+
+    match /users/{uid} {
+      function validProfile(d) {
+        return d.uid == uid && d.role in ['patient', 'doctor', 'receptionist', 'lab', 'admin'] &&
+          text(d.fullName, 100) && d.fullName.size() > 0 &&
+          (d.email == null || text(d.email, 254)) &&
+          (d.phone == '' || d.phone.matches('^[+]923[0-9]{9}$')) &&
+          (d.emergencyContact == '' || d.emergencyContact.matches('^[+]923[0-9]{9}$')) &&
+          (d.cnic == '' || d.cnic.matches('^[0-9]{5}-[0-9]{7}-[0-9]$')) &&
+          (d.dateOfBirth == '' || date(d.dateOfBirth)) &&
+          d.gender in ['', 'male', 'female', 'other'] &&
+          d.bloodGroup in ['', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'] &&
+          text(d.address, 500) && minor(d.baseSalaryMinor) && d.accountStatus in ['active', 'disabled'] &&
+          d.keys().hasOnly(['uid', 'email', 'role', 'fullName', 'phone', 'cnic', 'dateOfBirth', 'gender', 'address',
+            'emergencyContact', 'bloodGroup', 'accountStatus', 'activeVisitId', 'currentBedId', 'departmentId',
+            'department', 'specialization', 'licenseNumber', 'baseSalaryMinor', 'employmentStartDate', 'employmentEndDate', 'careTeamIds',
+            'payrollPolicy', 'schemaVersion', 'revision', 'createdAt', 'createdBy', 'updatedAt', 'updatedBy',
+            'lastAuditId', 'lastLogin', 'statusReason']);
+      }
+      function canRead() {
+        return signedIn() && (request.auth.uid == uid || admin() || role('receptionist') && resource.data.role == 'patient' ||
+          role('doctor') && resource.data.role == 'patient' && resource.data.careTeamIds.hasAny([request.auth.uid]));
+      }
+      allow get: if canRead();
+      allow list: if bounded() && (admin() || role('receptionist') && resource.data.role == 'patient');
+      allow create: if signedIn() && validProfile(request.resource.data) && createStamp(request.resource.data) &&
+        request.resource.data.role != 'admin' && request.resource.data.accountStatus == 'active' &&
+        request.resource.data.activeVisitId == null && request.resource.data.currentBedId == null &&
+        audit(request.resource.data, ['USER_REGISTERED', 'STAFF_CREATED']) &&
+        (uid == request.auth.uid && request.resource.data.role == 'patient' && request.resource.data.email == request.auth.token.email &&
+          request.resource.data.baseSalaryMinor == 0 && request.resource.data.departmentId == null ||
+         admin() || role('receptionist') && request.resource.data.role == 'patient');
+      allow update: if signedIn() && request.resource.data.role == resource.data.role && validProfile(request.resource.data) && (
+        // Login timestamp is recorded atomically with a corresponding auth audit.
+        request.auth.uid == uid && active() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastLogin']) &&
+          request.resource.data.lastLogin == request.time ||
+        updateStamp(request.resource.data) && (
+          (request.auth.uid == uid && active() || reception() && resource.data.role == 'patient') &&
+            changedOnly(['fullName', 'phone', 'cnic', 'dateOfBirth', 'gender', 'address', 'emergencyContact', 'bloodGroup']) &&
+            audit(request.resource.data, ['PROFILE_UPDATED']) ||
+          (request.auth.uid == uid && role('patient') || reception()) && resource.data.role == 'patient' && changedOnly(['careTeamIds']) &&
+            request.resource.data.careTeamIds is list && request.resource.data.careTeamIds.size() <= 50 &&
+            audit(request.resource.data, ['APPOINTMENT_CREATED']) &&
+            request.resource.data.careTeamIds.toSet() == resource.data.careTeamIds.toSet().union([
+              getAfter(dataPath('appointments', getAfter(dataPath('auditLogs', request.resource.data.lastAuditId)).data.targetId)).data.doctorId].toSet()) ||
+          admin() && resource.data.role in ['doctor', 'receptionist', 'lab'] &&
+            changedOnly(['accountStatus', 'statusReason', 'baseSalaryMinor', 'payrollPolicy']) &&
+            audit(request.resource.data, ['STAFF_STATUS_CHANGED', 'PAYROLL_POLICY_UPDATED']) ||
+          role('doctor') && resource.data.role == 'patient' && changedOnly(['activeVisitId']) &&
+            audit(request.resource.data, ['VISIT_CREATED', 'VISIT_DISCHARGED']) && (
+              request.resource.data.activeVisitId != null &&
+                getAfter(dataPath('visits', request.resource.data.activeVisitId)).data.patientId == uid &&
+                getAfter(dataPath('visits', request.resource.data.activeVisitId)).data.doctorId == request.auth.uid &&
+                getAfter(dataPath('visits', request.resource.data.activeVisitId)).data.status == 'active' ||
+              request.resource.data.activeVisitId == null &&
+                getAfter(dataPath('visits', resource.data.activeVisitId)).data.status == 'discharged' &&
+                getAfter(dataPath('visits', resource.data.activeVisitId)).data.locked == true) ||
+          reception() && resource.data.role == 'patient' && changedOnly(['currentBedId']) &&
+            audit(request.resource.data, ['BED_ASSIGNED', 'BED_RELEASED']) && (
+              request.resource.data.currentBedId != null && getAfter(dataPath('beds', request.resource.data.currentBedId)).data.patientId == uid ||
+              request.resource.data.currentBedId == null && getAfter(dataPath('beds', resource.data.currentBedId)).data.patientId == null)
+        )
+      );
+      allow delete: if false;
+    }
+
+    match /departments/{departmentId} {
+      function valid(d) {
+        return text(d.name, 100) && d.name.size() > 0 && d.active is bool && d.emergencyEnabled is bool &&
+          d.doctorIds is list && d.doctorIds.size() <= 100 && d.doctorProfiles is map && d.staffProfiles is map &&
+          d.services is map && d.services.size() <= 100 && d.revenueMinor is int && d.revenueMinor >= 0 && d.revenueMinor <= 9007199254740991 &&
+          d.revenue == d.revenueMinor / 100.0 && d.collectedRevenue == d.revenue &&
+          d.keys().hasOnly(['name', 'active', 'emergencyEnabled', 'headDoctorId', 'doctorIds', 'doctorProfiles', 'staffProfiles',
+            'services', 'revenueMinor', 'revenue', 'collectedRevenue', 'lastPaidInvoiceId', 'schemaVersion', 'revision',
+            'createdAt', 'createdBy', 'updatedAt', 'updatedBy', 'lastAuditId']);
+      }
+      // Catalogs are authenticated; public reads of users would expose payroll/PII.
+      allow get: if active();
+      allow list: if active() && bounded();
+      allow create: if admin() && valid(request.resource.data) && createStamp(request.resource.data) &&
+        request.resource.data.revenueMinor == 0 && request.resource.data.doctorIds.size() == 0 &&
+        request.resource.data.services.size() == 0 && audit(request.resource.data, ['DEPARTMENT_CREATED']);
+      allow update: if updateStamp(request.resource.data) && valid(request.resource.data) && (
+        admin() && changedOnly(['name', 'active', 'emergencyEnabled', 'headDoctorId', 'doctorIds', 'doctorProfiles', 'staffProfiles', 'services']) &&
+          audit(request.resource.data, ['STAFF_CREATED', 'STAFF_STATUS_CHANGED', 'DEPARTMENT_SERVICE_UPDATED', 'DOCTOR_SCHEDULE_UPDATED']) ||
+        reception() && changedOnly(['revenueMinor', 'revenue', 'collectedRevenue', 'lastPaidInvoiceId']) &&
+          audit(request.resource.data, ['PAYMENT_CONFIRMED']) &&
+          get(dataPath('invoices', request.resource.data.lastPaidInvoiceId)).data.status != 'paid' &&
+          getAfter(dataPath('invoices', request.resource.data.lastPaidInvoiceId)).data.status == 'paid' &&
+          getAfter(dataPath('invoices', request.resource.data.lastPaidInvoiceId)).data.departmentId == departmentId &&
+          request.resource.data.revenueMinor == resource.data.revenueMinor + getAfter(dataPath('invoices', request.resource.data.lastPaidInvoiceId)).data.totalMinor
+      );
+      allow delete: if false;
+    }
+
+    match /appointments/{appointmentId} {
+      function canRead(d) {
+        return active() && (d.kind == 'slot' || reception() || owns(d) || treating(d));
+      }
+      function scheduleMatches(d) {
+        let department = get(dataPath('departments', d.departmentId)).data;
+        let doctor = department.doctorProfiles[d.doctorId];
+        let local = d.scheduledAt + duration.value(5, 'h');
+        return department.active && doctor.active && department.doctorIds.hasAny([d.doctorId]) &&
+          doctor.schedule.times.hasAny([d.time]) && doctor.schedule.weekdays.hasAny([local.dayOfWeek() % 7]) &&
+          !doctor.schedule.closedDates.hasAny([d.date]) &&
+          local.year() == int(d.date.split('-')[0]) && local.month() == int(d.date.split('-')[1]) &&
+          local.day() == int(d.date.split('-')[2]) && local.hours() == int(d.time.split(':')[0]) &&
+          local.minutes() == int(d.time.split(':')[1]) &&
+          get(userPath(d.doctorId)).data.accountStatus == 'active';
+      }
+      function validSlot(d) {
+        return d.kind == 'slot' && d.status in ['reserved', 'available'] && id(d.doctorId) && date(d.date) &&
+          d.time.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$') &&
+          appointmentId == 'slot_' + d.doctorId + '_' + d.date + '_' + d.time.replace(':', '') &&
+          (d.status == 'available' && d.appointmentId == null || d.status == 'reserved' && id(d.appointmentId) &&
+            getAfter(dataPath('appointments', d.appointmentId)).data.doctorId == d.doctorId &&
+            getAfter(dataPath('appointments', d.appointmentId)).data.date == d.date &&
+            getAfter(dataPath('appointments', d.appointmentId)).data.time == d.time &&
+            getAfter(dataPath('appointments', d.appointmentId)).data.slotId == appointmentId &&
+            getAfter(dataPath('appointments', d.appointmentId)).data.status in ['scheduled', 'confirmed', 'checked-in', 'in-progress']);
+      }
+      function validAppointment(d) {
+        return d.kind == 'appointment' && id(d.patientId) && id(d.doctorId) && id(d.departmentId) && date(d.date) &&
+          d.time.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$') && d.scheduledAt is timestamp &&
+          d.status in ['scheduled', 'confirmed', 'checked-in', 'in-progress', 'completed', 'cancelled', 'no-show'] &&
+          text(d.reason, 2000) && d.reason.size() > 0 && minor(d.consultationFeeMinor) &&
+          d.paymentAmount == d.consultationFeeMinor / 100.0 && d.isEmergency is bool &&
+          d.paymentStatus in ['unpaid', 'paid'] && d.triage in [null, 'red', 'yellow', 'green'];
+      }
+      allow get: if canRead(resource.data) || active() && !exists(dataPath('appointments', appointmentId));
+      allow list: if bounded() && canRead(resource.data);
+      allow create: if active() && createStamp(request.resource.data) && audit(request.resource.data, ['APPOINTMENT_CREATED', 'APPOINTMENT_RESCHEDULED']) && (
+        validSlot(request.resource.data) ||
+        validAppointment(request.resource.data) && (reception() || role('patient') && owns(request.resource.data)) &&
+          request.resource.data.status == 'scheduled' && request.resource.data.scheduledAt > request.time &&
+          request.resource.data.paymentStatus == 'unpaid' && request.resource.data.triage == null &&
+          (!request.resource.data.isEmergency || reception() && get(dataPath('departments', request.resource.data.departmentId)).data.emergencyEnabled) &&
+          get(userPath(request.resource.data.patientId)).data.role == 'patient' &&
+          getAfter(dataPath('appointments', request.resource.data.slotId)).data.appointmentId == appointmentId && scheduleMatches(request.resource.data) &&
+          request.resource.data.consultationFeeMinor == get(dataPath('departments', request.resource.data.departmentId)).data.doctorProfiles[request.resource.data.doctorId].consultationFeeMinor
+      );
+      allow update: if active() && updateStamp(request.resource.data) && (
+        resource.data.kind == 'slot' && validSlot(request.resource.data) && changedOnly(['status', 'appointmentId']) &&
+          audit(request.resource.data, ['APPOINTMENT_CREATED', 'APPOINTMENT_UPDATED', 'APPOINTMENT_RESCHEDULED', 'VISIT_DISCHARGED']) &&
+          (resource.data.status == 'available' || request.resource.data.status == 'available' && (
+            getAfter(dataPath('appointments', resource.data.appointmentId)).data.status in ['cancelled', 'no-show', 'completed'] ||
+            getAfter(dataPath('appointments', resource.data.appointmentId)).data.slotId != appointmentId)) ||
+        resource.data.kind == 'appointment' && validAppointment(request.resource.data) && (
+          changedOnly(['status', 'statusReason', 'checkedInAt', 'checkedInBy']) && audit(request.resource.data, ['APPOINTMENT_UPDATED']) &&
+            (resource.data.status in ['scheduled', 'confirmed'] && request.resource.data.status == 'cancelled' && (owns(resource.data) || treating(resource.data) || reception()) ||
+             reception() && (resource.data.status == 'scheduled' && request.resource.data.status == 'confirmed' ||
+               resource.data.status == 'confirmed' && request.resource.data.status == 'checked-in' ||
+               resource.data.status in ['scheduled', 'confirmed'] && request.resource.data.status == 'no-show' && resource.data.scheduledAt < request.time)) ||
+          (reception() || role('patient') && owns(resource.data)) && resource.data.status in ['scheduled', 'confirmed'] &&
+            request.resource.data.status == 'scheduled' && request.resource.data.scheduledAt > request.time &&
+            changedOnly(['date', 'time', 'scheduledAt', 'slotId', 'status', 'statusReason']) &&
+            audit(request.resource.data, ['APPOINTMENT_RESCHEDULED']) && scheduleMatches(request.resource.data) &&
+            getAfter(dataPath('appointments', request.resource.data.slotId)).data.appointmentId == appointmentId &&
+            getAfter(dataPath('appointments', resource.data.slotId)).data.status == 'available' ||
+          treating(resource.data) && changedOnly(['status', 'visitId', 'invoiceId']) && audit(request.resource.data, ['VISIT_CREATED', 'VISIT_DISCHARGED']) &&
+            (resource.data.status == 'checked-in' && request.resource.data.status == 'in-progress' &&
+              getAfter(dataPath('visits', appointmentId)).data.status == 'active' ||
+             resource.data.status == 'in-progress' && request.resource.data.status == 'completed' &&
+              getAfter(dataPath('visits', resource.data.visitId)).data.status == 'discharged') ||
+          reception() && changedOnly(['paymentStatus']) && request.resource.data.paymentStatus == 'paid' &&
+            audit(request.resource.data, ['PAYMENT_CONFIRMED']) && getAfter(dataPath('invoices', resource.data.invoiceId)).data.status == 'paid' ||
+          reception() && resource.data.isEmergency && changedOnly(['triage', 'triagePriority', 'triageAssessment', 'triagedAt']) &&
+            text(request.resource.data.triageAssessment, 2000) && audit(request.resource.data, ['TRIAGE_CLASSIFIED'])
+        )
+      );
+      allow delete: if false;
+    }
+
+    match /visits/{visitId} {
+      function valid(d) {
+        return id(d.patientId) && id(d.doctorId) && id(d.departmentId) && d.appointmentId == visitId && d.invoiceId == visitId &&
+          d.status in ['active', 'discharged'] && d.locked is bool && text(d.chiefComplaint, 2000) &&
+          text(d.symptoms, 4000) && text(d.diagnosis, 4000) && text(d.notes, 6000) && d.vitals is map &&
+          d.prescription is list && d.prescription.size() <= 30 &&
+          d.openLabRequests is int && d.openLabRequests >= 0 && d.openLabRequests <= 10 &&
+          d.openOperations is int && d.openOperations >= 0 && d.openOperations <= 5 &&
+          (d.prescriptionPdf == null || file(d.prescriptionPdf) && d.prescriptionPdf.mimeType == 'application/pdf');
+      }
+      allow get: if clinicalRead(resource.data) || role('doctor') && !exists(dataPath('visits', visitId));
+      allow list: if bounded() && clinicalRead(resource.data);
+      allow create: if role('doctor') && valid(request.resource.data) && createStamp(request.resource.data) &&
+        request.resource.data.doctorId == request.auth.uid && request.resource.data.status == 'active' && request.resource.data.locked == false &&
+        get(dataPath('appointments', visitId)).data.status == 'checked-in' && get(dataPath('appointments', visitId)).data.doctorId == request.auth.uid &&
+        request.resource.data.patientId == get(dataPath('appointments', visitId)).data.patientId &&
+        request.resource.data.departmentId == get(dataPath('appointments', visitId)).data.departmentId &&
+        getAfter(userPath(request.resource.data.patientId)).data.activeVisitId == visitId &&
+        getAfter(dataPath('invoices', visitId)).data.visitId == visitId && audit(request.resource.data, ['VISIT_CREATED']);
+      allow update: if updateStamp(request.resource.data) && valid(request.resource.data) && (
+        changedOnly(['openLabRequests']) && resource.data.status == 'active' && resource.data.locked == false && (
+          audit(request.resource.data, ['LAB_REQUEST_CREATED', 'LAB_REQUEST_CANCELLED']) && treating(resource.data) ||
+          audit(request.resource.data, ['LAB_RESULT_UPLOADED']) && role('lab') && request.resource.data.openLabRequests == resource.data.openLabRequests - 1) ||
+        changedOnly(['openOperations']) && resource.data.status == 'active' && resource.data.locked == false &&
+          audit(request.resource.data, ['OPERATION_SCHEDULED', 'OPERATION_COMPLETED', 'OPERATION_CANCELLED']) && treating(resource.data) ||
+        changedOnly(['chiefComplaint', 'symptoms', 'diagnosis', 'vitals', 'prescription', 'prescriptionPdf', 'followUpDate', 'notes']) && treating(resource.data) && resource.data.locked == false &&
+          audit(request.resource.data, ['VISIT_UPDATED', 'PRESCRIPTION_ADDED']) ||
+        changedOnly(['status', 'locked', 'dischargedAt', 'dischargeNotes']) && treating(resource.data) && resource.data.status == 'active' && resource.data.locked == false &&
+          request.resource.data.status == 'discharged' && request.resource.data.locked == true &&
+          resource.data.bedId == null && resource.data.openLabRequests == 0 && resource.data.openOperations == 0 &&
+          request.resource.data.diagnosis.size() > 0 &&
+          getAfter(userPath(resource.data.patientId)).data.activeVisitId == null && audit(request.resource.data, ['VISIT_DISCHARGED']) ||
+        changedOnly(['locked', 'unlockedAt', 'unlockedBy', 'unlockReason']) && admin() && resource.data.status == 'discharged' && resource.data.locked && request.resource.data.locked == false &&
+          text(request.resource.data.unlockReason, 2000) &&
+          request.resource.data.unlockReason.size() > 0 && audit(request.resource.data, ['RECORD_UNLOCKED']) ||
+        changedOnly(['locked']) && (admin() || treating(resource.data)) && resource.data.status == 'discharged' && resource.data.locked == false &&
+          request.resource.data.locked && audit(request.resource.data, ['RECORD_RELOCKED']) ||
+        changedOnly(['bedId']) && reception() && resource.data.status == 'active' && resource.data.locked == false &&
+          audit(request.resource.data, ['BED_ASSIGNED', 'BED_RELEASED']) &&
+          (request.resource.data.bedId == null || getAfter(dataPath('beds', request.resource.data.bedId)).data.visitId == visitId)
+      );
+      allow delete: if false;
+    }
+
+    match /invoices/{invoiceId} {
+      function valid(d) {
+        return id(d.patientId) && id(d.doctorId) && id(d.departmentId) && d.visitId == invoiceId && d.appointmentId == invoiceId &&
+          d.items is list && d.items.size() > 0 && d.items.size() <= 100 && minor(d.subtotalMinor) && minor(d.taxMinor) && minor(d.totalMinor) &&
+          d.taxBasisPoints == 0 && d.taxMinor == 0 && d.totalMinor == d.subtotalMinor &&
+          d.total == d.totalMinor / 100.0 && d.subtotal == d.subtotalMinor / 100.0 && d.tax == 0 &&
+          d.status in ['unpaid', 'pending_confirmation', 'paid'] && d.locked == (d.status == 'paid');
+      }
+      function validLine(line) {
+        return id(line.id) && text(line.description, 200) && line.quantity is int && line.quantity > 0 && line.quantity <= 10000 &&
+          minor(line.unitPriceMinor) && minor(line.amountMinor) && line.amountMinor == line.quantity * line.unitPriceMinor;
+      }
+      function sourceLine(line, d) {
+        return line.sourceType == 'lab' && getAfter(dataPath('labRequests', line.sourceId)).data.invoiceId == invoiceId &&
+          getAfter(dataPath('labRequests', line.sourceId)).data.status == 'pending' && line.quantity == 1 &&
+          line.unitPriceMinor == getAfter(dataPath('labRequests', line.sourceId)).data.priceMinor ||
+        line.sourceType == 'operation' && getAfter(dataPath('operations', line.sourceId)).data.invoiceId == invoiceId &&
+          get(dataPath('operations', line.sourceId)).data.status == 'scheduled' && getAfter(dataPath('operations', line.sourceId)).data.status == 'in-progress' &&
+          line.quantity == 1 && line.unitPriceMinor == getAfter(dataPath('operations', line.sourceId)).data.chargeMinor + getAfter(dataPath('operations', line.sourceId)).data.inventoryCostMinor ||
+        line.sourceType == 'bed' && reception() && get(dataPath('beds', line.sourceId)).data.visitId == invoiceId &&
+          line.id == get(dataPath('beds', line.sourceId)).data.sessionId && getAfter(dataPath('beds', line.sourceId)).data.status == 'available' &&
+          line.unitPriceMinor == get(dataPath('beds', line.sourceId)).data.rateAtAssignmentMinor &&
+          line.quantity >= (request.time.toMillis() - get(dataPath('beds', line.sourceId)).data.assignedAt.toMillis()) / 86400000.0 &&
+          line.quantity <= (request.time.toMillis() - get(dataPath('beds', line.sourceId)).data.assignedAt.toMillis()) / 86400000.0 + 1;
+      }
+      function appended(d) {
+        let old = resource.data;
+        let last = d.items[d.items.size() - 1];
+        return d.items.size() == old.items.size() + 1 && d.items.removeAll([last]) == old.items &&
+          validLine(last) && sourceLine(last, d) && d.subtotalMinor == old.subtotalMinor + last.amountMinor;
+      }
+      allow get: if clinicalRead(resource.data) || reception() || role('doctor') && !exists(dataPath('invoices', invoiceId));
+      allow list: if bounded() && (clinicalRead(resource.data) || reception());
+      allow create: if role('doctor') && valid(request.resource.data) && createStamp(request.resource.data) &&
+        request.resource.data.status == 'unpaid' && request.resource.data.doctorId == request.auth.uid &&
+        request.resource.data.items.size() == 1 && validLine(request.resource.data.items[0]) &&
+        request.resource.data.items[0].sourceType == 'consultation' && request.resource.data.items[0].sourceId == invoiceId &&
+        request.resource.data.items[0].quantity == 1 && request.resource.data.subtotalMinor == request.resource.data.items[0].amountMinor &&
+        request.resource.data.items[0].unitPriceMinor == get(dataPath('appointments', invoiceId)).data.consultationFeeMinor &&
+        getAfter(dataPath('visits', invoiceId)).data.patientId == request.resource.data.patientId && audit(request.resource.data, ['VISIT_CREATED']);
+      allow update: if resource.data.status != 'paid' && resource.data.locked == false && updateStamp(request.resource.data) && valid(request.resource.data) && (
+        changedOnly(['items', 'subtotalMinor', 'taxMinor', 'totalMinor', 'subtotal', 'tax', 'total', 'taxBasisPoints']) &&
+          resource.data.status == 'unpaid' && audit(request.resource.data, ['LAB_REQUEST_CREATED', 'OPERATION_STARTED', 'BED_RELEASED']) &&
+          (treating(resource.data) || reception()) && appended(request.resource.data) ||
+        changedOnly(['status', 'paymentProof', 'payment']) && role('patient') && owns(resource.data) && resource.data.status == 'unpaid' && request.resource.data.status == 'pending_confirmation' &&
+          file(request.resource.data.paymentProof) &&
+          request.resource.data.payment.submittedBy == request.auth.uid && request.resource.data.payment.amountMinor == resource.data.totalMinor &&
+          text(request.resource.data.payment.reference, 150) && request.resource.data.payment.reference.size() > 0 && audit(request.resource.data, ['PAYMENT_PROOF_SUBMITTED']) ||
+        changedOnly(['status', 'paymentProof', 'payment', 'rejectionReason']) && reception() && resource.data.status == 'pending_confirmation' && request.resource.data.status == 'unpaid' &&
+          request.resource.data.payment == null && request.resource.data.paymentProof == null &&
+          audit(request.resource.data, ['PAYMENT_PROOF_REJECTED']) ||
+        changedOnly(['status', 'locked', 'paidAt', 'payment']) && reception() && request.resource.data.status == 'paid' && request.resource.data.locked &&
+          request.resource.data.paidAt == request.time &&
+          request.resource.data.payment.confirmedBy == request.auth.uid && request.resource.data.payment.confirmedAt == request.time &&
+          request.resource.data.payment.amountMinor == resource.data.totalMinor &&
+          (resource.data.status == 'pending_confirmation' && resource.data.paymentProof != null ||
+           resource.data.status == 'unpaid' && request.resource.data.payment.method == 'cash' && text(request.resource.data.payment.reference, 150)) &&
+          getAfter(dataPath('departments', resource.data.departmentId)).data.revenueMinor ==
+            get(dataPath('departments', resource.data.departmentId)).data.revenueMinor + resource.data.totalMinor && audit(request.resource.data, ['PAYMENT_CONFIRMED']) ||
+        changedOnly(['items', 'subtotalMinor', 'taxMinor', 'totalMinor', 'subtotal', 'tax', 'total', 'taxBasisPoints', 'cancelledLabRequestId']) && treating(resource.data) && resource.data.status == 'unpaid' &&
+          getAfter(dataPath('labRequests', request.resource.data.cancelledLabRequestId)).data.status == 'cancelled' &&
+          request.resource.data.items.size() == resource.data.items.size() - 1 &&
+          request.resource.data.subtotalMinor == resource.data.subtotalMinor - get(dataPath('labRequests', request.resource.data.cancelledLabRequestId)).data.priceMinor &&
+          audit(request.resource.data, ['LAB_REQUEST_CANCELLED'])
+      );
+      allow delete: if false;
+    }
+
+    match /beds/{bedId} {
+      function linked(d) {
+        return d.status == 'occupied' && id(d.patientId) && id(d.visitId) &&
+          getAfter(userPath(d.patientId)).data.currentBedId == bedId && getAfter(dataPath('visits', d.visitId)).data.bedId == bedId &&
+          get(dataPath('visits', d.visitId)).data.status == 'active' && get(dataPath('visits', d.visitId)).data.locked == false;
+      }
+      allow get: if reception() || role('doctor');
+      allow list: if bounded() && (reception() || role('doctor'));
+      allow create: if admin() && createStamp(request.resource.data) && request.resource.data.status == 'available' &&
+        request.resource.data.patientId == null && request.resource.data.visitId == null && minor(request.resource.data.dailyRateMinor) &&
+        audit(request.resource.data, ['BED_CREATED']);
+      allow update: if reception() && updateStamp(request.resource.data) &&
+        changedOnly(['status', 'patientId', 'visitId', 'sessionId', 'assignedAt', 'assignedBy', 'rateAtAssignmentMinor', 'releasedAt']) && (
+          resource.data.status == 'available' && linked(request.resource.data) && request.resource.data.assignedAt == request.time &&
+            request.resource.data.rateAtAssignmentMinor == resource.data.dailyRateMinor && audit(request.resource.data, ['BED_ASSIGNED', 'BED_RELEASED']) ||
+          resource.data.status == 'occupied' && request.resource.data.status == 'available' && request.resource.data.patientId == null &&
+            request.resource.data.visitId == null && getAfter(userPath(resource.data.patientId)).data.currentBedId != bedId &&
+            getAfter(dataPath('visits', resource.data.visitId)).data.bedId != bedId &&
+            getAfter(dataPath('invoices', resource.data.visitId)).data.items.size() == get(dataPath('invoices', resource.data.visitId)).data.items.size() + 1 &&
+            audit(request.resource.data, ['BED_RELEASED'])
+        );
+      allow delete: if false;
+    }
+
+    match /inventory/{itemId} {
+      function listedDeduction(item, d) {
+        return item.itemId == itemId && resource.data.quantity - d.quantity == item.quantity;
+      }
+      function exactDeduction(d) {
+        let items = getAfter(dataPath('operations', d.lastOperationId)).data.inventoryUsage;
+        return (items.size() > 0 && listedDeduction(items[0], d)) || (items.size() > 1 && listedDeduction(items[1], d)) ||
+          (items.size() > 2 && listedDeduction(items[2], d)) || (items.size() > 3 && listedDeduction(items[3], d)) ||
+          (items.size() > 4 && listedDeduction(items[4], d));
+      }
+      allow get: if staff();
+      allow list: if staff() && bounded();
+      allow create: if admin() && createStamp(request.resource.data) && minor(request.resource.data.priceMinor) &&
+        request.resource.data.quantity is int && request.resource.data.quantity >= 0 && request.resource.data.threshold is int &&
+        request.resource.data.threshold >= 0 && request.resource.data.usedQuantity == 0 && audit(request.resource.data, ['INVENTORY_CREATED']);
+      allow update: if updateStamp(request.resource.data) && request.resource.data.quantity is int && request.resource.data.quantity >= 0 && (
+        admin() && request.resource.data.quantity > resource.data.quantity && changedOnly(['quantity', 'lowStock', 'purchasedQuantity', 'purchaseValueMinor']) &&
+          request.resource.data.purchasedQuantity - resource.data.purchasedQuantity == request.resource.data.quantity - resource.data.quantity &&
+          request.resource.data.purchaseValueMinor - resource.data.purchaseValueMinor == (request.resource.data.quantity - resource.data.quantity) * resource.data.priceMinor &&
+          audit(request.resource.data, ['INVENTORY_RESTOCKED']) ||
+        role('doctor') && changedOnly(['quantity', 'usedQuantity', 'usageValueMinor', 'lastOperationId', 'lowStock']) &&
+          get(dataPath('operations', request.resource.data.lastOperationId)).data.status == 'scheduled' &&
+          getAfter(dataPath('operations', request.resource.data.lastOperationId)).data.status == 'in-progress' &&
+          getAfter(dataPath('operations', request.resource.data.lastOperationId)).data.doctorId == request.auth.uid &&
+          request.resource.data.usedQuantity - resource.data.usedQuantity == resource.data.quantity - request.resource.data.quantity &&
+          request.resource.data.usageValueMinor - resource.data.usageValueMinor == (resource.data.quantity - request.resource.data.quantity) * resource.data.priceMinor &&
+          exactDeduction(request.resource.data) &&
+          audit(request.resource.data, ['OPERATION_STARTED'])
+      );
+      allow delete: if false;
+    }
+
+    match /labRequests/{requestId} {
+      allow get: if role('lab') || treating(resource.data) || admin() || role('patient') && owns(resource.data) && resource.data.status == 'completed' ||
+        role('doctor') && !exists(dataPath('labRequests', requestId));
+      allow list: if bounded() && (role('lab') || treating(resource.data) || admin() || role('patient') && owns(resource.data) && resource.data.status == 'completed');
+      allow create: if role('doctor') && createStamp(request.resource.data) && request.resource.data.doctorId == request.auth.uid &&
+        activeVisit(request.resource.data.visitId) && request.resource.data.status == 'pending' && request.resource.data.result == null &&
+        get(dataPath('departments', request.resource.data.departmentId)).data.services[request.resource.data.testId].type == 'lab' &&
+        request.resource.data.priceMinor == get(dataPath('departments', request.resource.data.departmentId)).data.services[request.resource.data.testId].priceMinor &&
+        getAfter(dataPath('visits', request.resource.data.visitId)).data.openLabRequests == get(dataPath('visits', request.resource.data.visitId)).data.openLabRequests + 1 &&
+        audit(request.resource.data, ['LAB_REQUEST_CREATED']);
+      allow update: if updateStamp(request.resource.data) && (
+        role('lab') && resource.data.status in ['pending', 'in-progress'] && request.resource.data.status == 'completed' &&
+          file(request.resource.data.result) && text(request.resource.data.resultSummary, 4000) &&
+          changedOnly(['status', 'result', 'resultSummary', 'completedAt', 'completedBy']) && request.resource.data.completedBy == request.auth.uid &&
+          getAfter(dataPath('visits', resource.data.visitId)).data.openLabRequests == get(dataPath('visits', resource.data.visitId)).data.openLabRequests - 1 &&
+          audit(request.resource.data, ['LAB_RESULT_UPLOADED']) ||
+        treating(resource.data) && resource.data.status == 'pending' && request.resource.data.status == 'cancelled' &&
+          changedOnly(['status', 'cancellationReason']) && getAfter(dataPath('visits', resource.data.visitId)).data.openLabRequests ==
+            get(dataPath('visits', resource.data.visitId)).data.openLabRequests - 1 && audit(request.resource.data, ['LAB_REQUEST_CANCELLED'])
+      );
+      allow delete: if false;
+    }
+
+    match /operations/{operationId} {
+      function quote(item) {
+        let inventory = get(dataPath('inventory', item.itemId)).data;
+        return item.quantity is int && item.quantity > 0 && item.quantity <= 10000 &&
+          item.unitPriceMinor == inventory.priceMinor &&
+          item.amountMinor == item.quantity * item.unitPriceMinor &&
+          inventory.category != 'equipment';
+      }
+      function quoteValid(d) {
+        let a = d.inventoryUsage;
+        return (a.size() < 1 || quote(a[0])) && (a.size() < 2 || quote(a[1])) &&
+          (a.size() < 3 || quote(a[2])) && (a.size() < 4 || quote(a[3])) && (a.size() < 5 || quote(a[4])) &&
+          d.inventoryCostMinor == (a.size() > 0 ? a[0].amountMinor : 0) + (a.size() > 1 ? a[1].amountMinor : 0) +
+            (a.size() > 2 ? a[2].amountMinor : 0) + (a.size() > 3 ? a[3].amountMinor : 0) + (a.size() > 4 ? a[4].amountMinor : 0) &&
+          (a.size() < 2 || a[0].itemId != a[1].itemId) &&
+          (a.size() < 3 || a[0].itemId != a[2].itemId && a[1].itemId != a[2].itemId) &&
+          (a.size() < 4 || a[0].itemId != a[3].itemId && a[1].itemId != a[3].itemId && a[2].itemId != a[3].itemId) &&
+          (a.size() < 5 || a[0].itemId != a[4].itemId && a[1].itemId != a[4].itemId && a[2].itemId != a[4].itemId && a[3].itemId != a[4].itemId);
+      }
+      function consumed(item, d) {
+        let before = get(dataPath('inventory', item.itemId)).data;
+        let after = getAfter(dataPath('inventory', item.itemId)).data;
+        return item.quantity is int && item.quantity > 0 && item.unitPriceMinor == before.priceMinor &&
+          after.quantity == before.quantity - item.quantity && after.lastOperationId == operationId;
+      }
+      function allConsumed(d) {
+        let items = d.inventoryUsage;
+        return (items.size() < 1 || consumed(items[0], d)) && (items.size() < 2 || consumed(items[1], d)) &&
+          (items.size() < 3 || consumed(items[2], d)) && (items.size() < 4 || consumed(items[3], d)) &&
+          (items.size() < 5 || consumed(items[4], d));
+      }
+      function validNewOperation(d) {
+        let visit = get(dataPath('visits', d.visitId)).data;
+        let nextVisit = getAfter(dataPath('visits', d.visitId)).data;
+        let catalogueItem = get(dataPath('departments', d.departmentId)).data.services[d.serviceId];
+        return visit.status == 'active' && visit.locked == false && visit.doctorId == request.auth.uid &&
+          d.patientId == visit.patientId && d.invoiceId == visit.invoiceId && d.departmentId == visit.departmentId &&
+          d.doctorId == request.auth.uid && d.status == 'scheduled' && d.locked == false && d.inventoryDeducted == false &&
+          d.inventoryUsage is list && d.inventoryUsage.size() <= 5 && minor(d.inventoryCostMinor) && quoteValid(d) &&
+          d.requiredStaff is list && d.requiredStaff.size() > 0 && d.requiredStaff.size() <= 5 && d.requiredStaff.hasAny([request.auth.uid]) &&
+          catalogueItem.type == 'operation' && catalogueItem.active == true && minor(d.chargeMinor) && d.chargeMinor == catalogueItem.priceMinor &&
+          nextVisit.openOperations == visit.openOperations + 1;
+      }
+      allow get: if clinicalRead(resource.data) || role('doctor') && !exists(dataPath('operations', operationId));
+      allow list: if bounded() && clinicalRead(resource.data);
+      allow create: if role('doctor') && createStamp(request.resource.data) && validNewOperation(request.resource.data) &&
+        audit(request.resource.data, ['OPERATION_SCHEDULED']);
+      allow update: if treating(resource.data) && updateStamp(request.resource.data) && (
+        resource.data.status == 'scheduled' && resource.data.locked == false && changedOnly(['checklist']) &&
+          audit(request.resource.data, ['OPERATION_CHECKLIST_CONFIRMED']) ||
+        resource.data.status == 'scheduled' && request.resource.data.status == 'in-progress' && request.resource.data.locked && request.resource.data.inventoryDeducted &&
+          resource.data.checklist.staffConfirmed && resource.data.checklist.equipmentConfirmed && resource.data.checklist.consentConfirmed && resource.data.checklist.riskAcknowledged &&
+          changedOnly(['status', 'locked', 'inventoryDeducted', 'startedAt']) && allConsumed(request.resource.data) &&
+          getAfter(dataPath('invoices', resource.data.invoiceId)).data.items.size() == get(dataPath('invoices', resource.data.invoiceId)).data.items.size() + 1 &&
+          audit(request.resource.data, ['OPERATION_STARTED']) ||
+        resource.data.status == 'in-progress' && request.resource.data.status == 'completed' && request.resource.data.locked &&
+          changedOnly(['status', 'locked', 'outcome', 'completedAt']) && text(request.resource.data.outcome, 6000) &&
+          getAfter(dataPath('visits', resource.data.visitId)).data.openOperations == get(dataPath('visits', resource.data.visitId)).data.openOperations - 1 &&
+          audit(request.resource.data, ['OPERATION_COMPLETED']) ||
+        resource.data.status == 'scheduled' && request.resource.data.status == 'cancelled' && request.resource.data.locked &&
+          changedOnly(['status', 'locked', 'cancellationReason']) && getAfter(dataPath('visits', resource.data.visitId)).data.openOperations ==
+            get(dataPath('visits', resource.data.visitId)).data.openOperations - 1 && audit(request.resource.data, ['OPERATION_CANCELLED'])
+      );
+      allow delete: if false;
+    }
+
+    match /attendance/{attendanceId} {
+      function valid(d) {
+        return d.userId is string && date(d.date) && attendanceId == d.userId + '_' + d.date &&
+          d.kind == 'daily' &&
+          d.status in ['present', 'absent', 'late', 'half-day', 'leave'] &&
+          get(userPath(d.userId)).data.role in ['doctor', 'receptionist', 'lab'] &&
+          d.date >= get(userPath(d.userId)).data.employmentStartDate &&
+          (get(userPath(d.userId)).data.employmentEndDate == null || d.date <= get(userPath(d.userId)).data.employmentEndDate) &&
+          !exists(dataPath('salaryRecords', d.userId + '_' + d.date.split('-')[0] + '-' + d.date.split('-')[1]));
+      }
+      allow get: if reception() || active() && resource.data.userId == request.auth.uid;
+      allow list: if bounded() && (reception() || active() && resource.data.userId == request.auth.uid);
+      allow create: if createStamp(request.resource.data) && (
+        request.resource.data.kind == 'daily' && reception() && valid(request.resource.data) && audit(request.resource.data, ['ATTENDANCE_MARKED']) ||
+        request.resource.data.kind == 'payroll-lock' && admin() && request.resource.data.locked == true &&
+          attendanceId == request.resource.data.salaryId + '_lock' &&
+          getAfter(dataPath('salaryRecords', request.resource.data.salaryId)).data.userId == request.resource.data.userId &&
+          audit(request.resource.data, ['SALARY_CALCULATED'])
+      );
+      allow update: if reception() && valid(request.resource.data) && updateStamp(request.resource.data) &&
+        changedOnly(['status', 'markedBy', 'markedAt', 'correctionReason']) && request.resource.data.correctionReason.size() > 0 && audit(request.resource.data, ['ATTENDANCE_MARKED']);
+      allow delete: if false;
+    }
+
+    match /salaryRecords/{salaryId} {
+      function valid(d) {
+        return d.month is int && d.month >= 1 && d.month <= 12 && d.year is int && d.year >= 2000 && d.year <= 2100 &&
+          salaryId == d.userId + '_' + string(d.year) + '-' + (d.month < 10 ? '0' : '') + string(d.month) &&
+          minor(d.grossMinor) && minor(d.deductionMinor) && minor(d.netSalaryMinor) &&
+          d.netSalaryMinor == d.grossMinor - d.deductionMinor && d.grossMinor <= d.baseSalaryMinor &&
+          d.calculatedSalary == d.netSalaryMinor / 100.0 && d.payrollPolicy.divisor == 26;
+      }
+      allow get: if admin() || active() && resource.data.userId == request.auth.uid;
+      allow list: if bounded() && (admin() || active() && resource.data.userId == request.auth.uid);
+      allow create: if admin() && createStamp(request.resource.data) && valid(request.resource.data) &&
+        request.resource.data.status == 'pending' && request.resource.data.locked == false &&
+        request.resource.data.baseSalaryMinor == get(userPath(request.resource.data.userId)).data.baseSalaryMinor &&
+        getAfter(dataPath('attendance', salaryId + '_lock')).data.locked == true &&
+        request.resource.data.policyVersion == get(userPath(request.resource.data.userId)).data.payrollPolicy.version && audit(request.resource.data, ['SALARY_CALCULATED']);
+      allow update: if admin() && valid(request.resource.data) && updateStamp(request.resource.data) && (
+        resource.data.status == 'pending' && request.resource.data.status == 'paid' && request.resource.data.locked &&
+          changedOnly(['status', 'locked', 'paidAt', 'paidBy', 'paymentMethod', 'paymentReference']) &&
+          request.resource.data.paidBy == request.auth.uid && request.resource.data.paidAt == request.time &&
+          request.resource.data.paymentMethod in ['cash', 'bank_transfer'] && request.resource.data.paymentReference.size() > 0 && audit(request.resource.data, ['SALARY_PAID']) ||
+        resource.data.status == 'paid' && resource.data.salaryPdf == null && changedOnly(['salaryPdf']) && file(request.resource.data.salaryPdf) &&
+          request.resource.data.salaryPdf.mimeType == 'application/pdf' && audit(request.resource.data, ['SALARY_PDF_GENERATED'])
+      );
+      allow delete: if false;
+    }
+
+    match /chats/{chatId} {
+      function becameSeen(messageId) {
+        let before = get(dataPath('messages', messageId)).data;
+        let after = getAfter(dataPath('messages', messageId)).data;
+        return before.chatId == chatId && before.recipientId == request.auth.uid && before.status != 'seen' && after.status == 'seen' ? 1 : 0;
+      }
+      function seenDelta(d) {
+        let ids = getAfter(dataPath('auditLogs', d.lastAuditId)).data.details.messageIds;
+        return ids.size() >= 1 && ids.size() <= 8 && ids.toSet().size() == ids.size() &&
+          resource.data.unreadCount[request.auth.uid] - d.unreadCount[request.auth.uid] ==
+          (ids.size() > 0 ? becameSeen(ids[0]) : 0) + (ids.size() > 1 ? becameSeen(ids[1]) : 0) +
+          (ids.size() > 2 ? becameSeen(ids[2]) : 0) + (ids.size() > 3 ? becameSeen(ids[3]) : 0) +
+          (ids.size() > 4 ? becameSeen(ids[4]) : 0) + (ids.size() > 5 ? becameSeen(ids[5]) : 0) +
+          (ids.size() > 6 ? becameSeen(ids[6]) : 0) + (ids.size() > 7 ? becameSeen(ids[7]) : 0);
+      }
+      function participant(d) { return active() && request.auth.uid in d.participants; }
+      function valid(d) {
+        return d.participants == [d.doctorId, d.patientId] && d.doctorId != d.patientId &&
+          chatId == 'chat_' + d.doctorId + '_' + d.patientId &&
+          d.sequence is int && d.sequence >= 0 && d.unreadCount is map &&
+          d.unreadCount.keys().hasOnly(d.participants) && d.unreadCount[d.doctorId] is int && d.unreadCount[d.doctorId] >= 0 &&
+          d.unreadCount[d.patientId] is int && d.unreadCount[d.patientId] >= 0;
+      }
+      allow get: if participant(resource.data) || active() && !exists(dataPath('chats', chatId)) &&
+        (chatId.matches('^chat_' + request.auth.uid + '_.*$') || chatId.matches('^chat_.*_' + request.auth.uid + '$'));
+      allow list: if bounded() && participant(resource.data);
+      allow create: if active() && valid(request.resource.data) && createStamp(request.resource.data) &&
+        request.auth.uid in request.resource.data.participants &&
+        getAfter(dataPath('appointments', request.resource.data.appointmentId)).data.doctorId == request.resource.data.doctorId &&
+        getAfter(dataPath('appointments', request.resource.data.appointmentId)).data.patientId == request.resource.data.patientId &&
+        get(userPath(request.resource.data.doctorId)).data.role == 'doctor' && get(userPath(request.resource.data.patientId)).data.role == 'patient' &&
+        request.resource.data.sequence == 0 && request.resource.data.unreadCount[request.resource.data.doctorId] == 0 &&
+        request.resource.data.unreadCount[request.resource.data.patientId] == 0 && audit(request.resource.data, ['VISIT_CREATED']);
+      allow update: if participant(resource.data) && valid(request.resource.data) && updateStamp(request.resource.data) && (
+        changedOnly(['sequence', 'lastMessage', 'lastMessageAt', 'unreadCount']) && request.resource.data.sequence == resource.data.sequence + 1 &&
+          getAfter(dataPath('messages', request.resource.data.lastMessage.id)).data.chatId == chatId &&
+          getAfter(dataPath('messages', request.resource.data.lastMessage.id)).data.senderId == request.auth.uid &&
+          getAfter(dataPath('messages', request.resource.data.lastMessage.id)).data.sequence == request.resource.data.sequence &&
+          request.resource.data.unreadCount[request.auth.uid] == resource.data.unreadCount[request.auth.uid] &&
+          request.resource.data.unreadCount[request.auth.uid == resource.data.doctorId ? resource.data.patientId : resource.data.doctorId] ==
+            resource.data.unreadCount[request.auth.uid == resource.data.doctorId ? resource.data.patientId : resource.data.doctorId] + 1 &&
+          audit(request.resource.data, ['CHAT_MESSAGE_SENT']) ||
+        changedOnly(['unreadCount']) && request.resource.data.unreadCount[request.auth.uid] <= resource.data.unreadCount[request.auth.uid] &&
+          request.resource.data.unreadCount[request.auth.uid == resource.data.doctorId ? resource.data.patientId : resource.data.doctorId] ==
+            resource.data.unreadCount[request.auth.uid == resource.data.doctorId ? resource.data.patientId : resource.data.doctorId] &&
+          audit(request.resource.data, ['CHAT_MESSAGES_READ']) && seenDelta(request.resource.data)
+      );
+      allow delete: if false;
+    }
+
+    match /messages/{messageId} {
+      function participant(d) { return active() && request.auth.uid in get(dataPath('chats', d.chatId)).data.participants; }
+      allow get: if participant(resource.data) || active() && !exists(dataPath('messages', messageId));
+      allow list: if bounded() && participant(resource.data);
+      allow create: if participant(request.resource.data) && createStamp(request.resource.data) &&
+        request.resource.data.senderId == request.auth.uid && request.resource.data.recipientId != request.auth.uid &&
+        request.resource.data.recipientId in get(dataPath('chats', request.resource.data.chatId)).data.participants &&
+        text(request.resource.data.text, 4000) && (request.resource.data.text.size() > 0 || file(request.resource.data.file)) &&
+        (request.resource.data.file == null || file(request.resource.data.file)) && request.resource.data.status == 'sent' &&
+        request.resource.data.timestamp == request.time &&
+        getAfter(dataPath('chats', request.resource.data.chatId)).data.sequence == request.resource.data.sequence &&
+        getAfter(dataPath('chats', request.resource.data.chatId)).data.lastMessage.id == messageId && audit(request.resource.data, ['CHAT_MESSAGE_SENT']);
+      allow update: if participant(resource.data) && request.auth.uid == resource.data.recipientId && updateStamp(request.resource.data) &&
+        changedOnly(['status', 'deliveredAt', 'seenAt']) &&
+        (resource.data.status == 'sent' && request.resource.data.status in ['delivered', 'seen'] ||
+         resource.data.status == 'delivered' && request.resource.data.status == 'seen') && audit(request.resource.data, ['CHAT_MESSAGES_READ']);
+      allow delete: if false;
+    }
+
+    match /ratings/{ratingId} {
+      allow get: if clinicalRead(resource.data) || role('patient') && !exists(dataPath('ratings', ratingId));
+      allow list: if bounded() && clinicalRead(resource.data);
+      allow create: if role('patient') && owns(request.resource.data) && createStamp(request.resource.data) &&
+        request.resource.data.visitId == ratingId && request.resource.data.rating is int &&
+        request.resource.data.rating >= 1 && request.resource.data.rating <= 5 && text(request.resource.data.review, 2000) &&
+        get(dataPath('visits', ratingId)).data.patientId == request.auth.uid && get(dataPath('visits', ratingId)).data.status == 'discharged' &&
+        request.resource.data.doctorId == get(dataPath('visits', ratingId)).data.doctorId && audit(request.resource.data, ['DOCTOR_RATED']);
+      allow update, delete: if false;
+    }
+
+    match /auditLogs/{logId} {
+      allow get: if admin();
+      allow list: if admin() && bounded();
+      allow create: if signedIn() && request.resource.data.schemaVersion == 2 &&
+        request.resource.data.keys().hasOnly(['schemaVersion', 'actorId', 'userId', 'action', 'targetCollection', 'targetId', 'details', 'timestamp']) &&
+        request.resource.data.actorId == request.auth.uid && request.resource.data.userId == request.auth.uid &&
+        request.resource.data.timestamp == request.time && request.resource.data.details is map &&
+        (request.resource.data.action in ['USER_LOGIN', 'USER_LOGOUT'] && active() && request.resource.data.targetCollection == 'users' &&
+          request.resource.data.targetId == request.auth.uid ||
+         getAfter(dataPath(request.resource.data.targetCollection, request.resource.data.targetId)).data.lastAuditId == logId &&
+          getAfter(dataPath(request.resource.data.targetCollection, request.resource.data.targetId)).data.updatedBy == request.auth.uid);
+      allow update, delete: if false;
+    }
+    // Legacy/unrecognized collections and every nested collection are denied.
+    match /{document=**} { allow read, write: if false; }
   }
-  
-  match /emergencies/{id} {
-  allow read: if request.auth != null &&
-    request.auth.token.role in ['emergency','doctor','admin'];
-
-  allow write: if request.auth != null &&
-    request.auth.token.role == 'emergency';
-}
-
-match /triage/{id} {
-  allow read: if request.auth != null;
-  allow write: if request.auth != null &&
-    request.auth.token.role in ['emergency','doctor'];
-}
-
-match /beds/{id} {
-  allow read: if request.auth != null;
-  allow write: if request.auth != null &&
-    request.auth.token.role == 'emergency';
-}
-
 }

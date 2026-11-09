@@ -1,281 +1,135 @@
-# 🏥 MediCare Plus - Smart Hospital Management System
+# MediCare Plus
 
-A production-grade, enterprise-level hospital management system built with React, Firebase, and Tailwind CSS.
+Repository: https://github.com/usman0120/MediCarePlus-Hospital-system
 
-## 🚀 Features
+Existing preview: https://medicareplushospital.vercel.app (not approved for real patient data).
+For support, create an issue in the repository. Never commit the `.env` file.
 
-### 👥 User Roles
+React + Vite hospital management application using Firebase Authentication,
+Firestore, Tailwind CSS, Chart.js, FontAwesome and jsPDF.
 
-- **Patient**: Self-registration, appointment booking, EMR access, billing, chat with doctors
-- **Doctor**: Schedule management, EMR creation, prescriptions, lab requests, patient chat
-- **Receptionist**: Walk-in registration, bed assignment, payment confirmation, triage
-- **Lab**: Test request management, result upload, report generation
-- **Admin**: Full system control, staff management, analytics, inventory, salary processing
+## Current status
 
-### 🏥 Core Modules
+**Under staged remediation, not approved for clinical production use.**
 
-- **Appointment Management**: Smart scheduling with availability checking
-- **Electronic Medical Records (EMR)**: Structured format with vitals, diagnosis, prescriptions
-- **Smart Prescription Builder**: Generate PDF prescriptions with medicine details
-- **Lab Integration**: Request tests, upload results, automatic notifications
-- **Billing System**: Auto-calculation, payment proof upload, confirmation workflow
-- **Bed Management**: Real-time availability, assignment, occupancy tracking
-- **Inventory Management**: Stock tracking, low stock alerts, usage analytics
-- **Chat System**: Real-time messaging with file sharing, read receipts
-- **Emergency Triage**: Color-coded priority system (Red/Yellow/Green)
-- **Analytics Dashboard**: Revenue trends, department performance, insights
+The authoritative V2 data API is the `hospital` export in `src/database.js`.
+It includes appointment-slot transactions, structured visits, invoice/payment
+transactions, bed billing/transfers, lab requests, operation/inventory transactions,
+attendance, fixed-26 payroll, participant-only chat and audit records.
 
-### 🔐 Security
+The older dashboard exports below this API remain during migration. They are **not
+compatible with the new rules/schema** and must be replaced before deployment.
+See [AUDIT.md](AUDIT.md) for outstanding issues, limitations and migration work.
 
-- Role-based access control
-- Email verification required
-- Admin MFA simulation
-- Audit logging for all actions
-- Firestore security rules
-- Data encryption at rest
+## Local development
 
-## 🛠️ Tech Stack
+1. Use Node.js 22.12+ and `npm ci`.
+2. Copy `.env.example` to `.env` and provide your Firebase web configuration.
+3. Enable Email/Password and Google providers and configure authorized domains.
+4. Run `npm run dev`.
 
-- **Frontend**: React 19 + Vite
-- **Styling**: Tailwind CSS
-- **State Management**: Context API
-- **Backend**: Firebase (Auth, Firestore)
-- **Charts**: Chart.js, Recharts
-- **PDF Generation**: jsPDF
-- **Icons**: FontAwesome
-- **Hosting**: Vercel
+There are no default passwords or public administrator/staff registration forms.
+Patients must verify their email. Shared-device sessions use session persistence;
+remembering a session is opt-in. Medical data is not deliberately persisted to disk.
 
-## 📁 Project Structure
+## Verification
 
-medicare-plus/
-├── src/
-│ ├── main.jsx # Entry point
-│ ├── App.jsx # Main app component with routing
-│ ├── firebase.js # Firebase configuration
-│ ├── auth.js # Authentication logic
-│ ├── database.js # All Firestore operations
-│ ├── context/
-│ │ └── AuthContext.jsx # Auth state management
-│ ├── routes/
-│ │ └── ProtectedRoute.jsx # Route protection
-│ ├── pages/ # All page components
-│ ├── components/ # Reusable components
-│ └── utils/ # Utilities
-├── .env # Environment variables
-├── firestore.rules # Firestore security rules
-└── package.json
-
-text
-
-## 🚦 Getting Started
-
-### Prerequisites
-
-- Node.js 18+
-- npm or yarn
-- Firebase account
-
-### Installation
-
-1. Clone the repository
-
-git clone <https://github.com/yourusername/medicare-plus.git>
-cd medicare-plus
-Install dependencies
-
-bash
-npm install
-Create Firebase project and enable:
-
-Authentication (Email/Password, Google, Phone)
-
-Firestore Database
-
-Copy .env.example to .env and add your Firebase config
-
-bash
-cp .env.example .env
-Update Firebase security rules
-
-bash
-
-# Copy firestore.rules to Firebase console
-
-Start development server
-
-bash
-npm run dev
-Default Admin Credentials
-Email: <admin@medicareplus.com>
-
-Password: Admin@MediCare2024
-
-OTP: 123456 (for MFA simulation)
-
-📦 Deployment
-Deploy to Vercel
-bash
-npm run build
-vercel --prod
-Firestore Rules Deployment
-bash
-firebase deploy --only firestore:rules
-🔒 Security Features
-Authentication: Email verification, Google Sign-in, Phone OTP
-
-Authorization: Role-based access in Firestore rules
-
-Data Validation: Client-side and server-side validation
-
-Audit Trail: All critical actions logged
-
-Record Locking: Medical records locked after discharge
-
-Payment Security: Invoice locking after payment
-
-🤖 Automation Features
-Automatic invoice calculation
-
-Department revenue tracking
-
-Salary calculation based on attendance
-
-Inventory deduction on operations
-
-Low stock alerts
-
-Bed occupancy monitoring
-
-Emergency case spike detection
-
-📊 Analytics & Insights
-Revenue trends by department
-
-Doctor performance metrics
-
-Peak hours identification
-
-Bed occupancy rates
-
-Inventory usage patterns
-
-Patient visit statistics
-
-🎨 UI/UX Features
-Mobile-first responsive design
-
-Dark/Light mode toggle
-
-Role-based color themes
-
-Skeleton loaders
-
-Optimistic updates
-
-Toast notifications
-
-Keyboard navigation
-
-Accessibility compliance
-
-🧪 Testing
-bash
-
-# Run tests
-
+```sh
 npm test
-
-# Run linting
-
+npm run test:rules
 npm run lint
-🤝 Contributing
-Fork the repository
+npm run build
+```
 
-Create feature branch (git checkout -b feature/AmazingFeature)
+The rules tests require Firebase CLI and Java. They use only the local
+`demo-medicare-foundation` emulator project, with synthetic test fixtures.
+They do not seed application data or connect to the live hospital project.
 
-Commit changes (git commit -m 'Add AmazingFeature')
+## Sole administrator provisioning / test-data reset
 
-Push to branch (git push origin feature/AmazingFeature)
+`scripts/reset-firebase.mjs` uses the Firebase Admin SDK **only as an owner-run
+maintenance tool**, not as a deployed backend. It does not need Cloud Functions.
 
-Open a Pull Request
+Set these **server-only shell variables**:
 
-📝 License
-This project is licensed under the MIT License.
+- `GOOGLE_APPLICATION_CREDENTIALS`: absolute path to a service account for the
+  intended project. Keep the JSON file outside the repository.
+- `MEDICARE_FIREBASE_PROJECT`: the exact project ID.
+- `MEDICARE_ADMIN_EMAIL`: the administrator email requested by the project owner.
+- `MEDICARE_ADMIN_PASSWORD`: the password, provided securely in the local shell.
 
-👥 Authors
-Your Name - Initial work
+Never use a `VITE_` prefix for administrator credentials; Vite values are public.
 
-🙏 Acknowledgments
-Firebase for backend services
+Run `npm run firebase:reset` first. This is read-only and reports the target,
+account count and collections. After reviewing that output, apply explicitly:
 
-Vercel for hosting
+```sh
+npm run firebase:reset -- --apply --confirm-project=YOUR_EXACT_PROJECT_ID
+```
 
-All contributors and testers
+Applying first creates a protected local backup, then removes test accounts and
+Firestore data, retaining/provisioning one admin. Auth and Firestore cannot share
+one atomic transaction; stop and review the backup if maintenance fails.
+Run only while the project is offline to avoid concurrent registrations/writes.
+Protect backups with OS access controls and approved encryption, then move them
+outside the workspace. Password hashes may be present in the Auth backup.
 
-📞 Support
-For support, email <support@medicareplus.com> or create an issue in the repository.
+The current CLI account has not been shown to have access to `fyp2-175ea`.
+No remote reset, admin creation, index deployment or rules deployment has run.
 
-🚨 Important Notes
-Never commit .env file
+## Administrator MFA
 
-Keep Firebase rules updated
+The rules require Firebase's real `sign_in_second_factor: totp` token claim for
+administrator privileges. **The owner has declined paid Auth features**, so
+`VITE_ENABLE_TOTP=false` and privileged admin access intentionally remains blocked.
+No paid Auth configuration has been enabled. A secure, free verification alternative
+requires a separate architecture decision; a browser-only simulation is not one.
+The login page supports authenticators and gated enrollment;
+there is no simulated OTP fallback. Firebase Identity Platform/TOTP configuration
+and any associated billing must be approved before enabling administrator access.
+First sign in, verify email, enroll an authenticator and sign in again with MFA.
 
-Regular backups recommended
+Phone OTP helpers support linking a verified phone to an email-verified account;
+SMS sending is disabled by default (`VITE_ENABLE_PHONE_AUTH=false`) under the
+owner's no-paid-Auth decision. No SMS configuration has been enabled.
+phone-only identity does not meet the mandatory verified-email policy. SMS quotas
+and billing depend on Firebase's plan and country configuration.
 
-Monitor usage quotas
+## Financial and clinical policies
 
-Test in staging before production
+- Money is stored in integer PKR paisa (`*Minor`). Display values are derived.
+- A slot is reserved before payment; reception checks in the patient, and the
+  assigned doctor opens the visit and consultation invoice.
+- Patients submit proof; only reception/admin confirms money received. Confirmation
+  locks the invoice and updates department revenue in the same transaction.
+- Additional services require an unpaid invoice. Pending proof must be rejected
+  before more charges can be added. Paid invoices are immutable; amendments/refunds
+  require a separately designed policy, not silent changes to paid records.
+- Bed charges use the documented rolling-24-hour, minimum-one-day policy on release.
+  This policy needs hospital approval before use.
+- Salary uses a 26-day deduction divisor. The owner-approved default is Monday–Saturday,
+  Sunday off, paid approved leave, no lateness deduction and a half-day deduction
+  of 0.5 daily salary. This remains configurable per staff member. Missing attendance blocks finalization.
+  Finalized payroll freezes attendance; salary payout cannot be repeated.
+- No tax, overtime, discounts or fees are invented. Approve those policies before
+  extending the financial schema.
 
-Built with ❤️ for better healthcare
+## Files and platform limits
 
-text
+Files are gzip-compressed client-side into Base64 with size metadata and SHA-256
+checksums. Supported files are PDF/JPEG/PNG/WebP. Compressed Base64 must be at most
+600,000 characters, and the complete application document is capped conservatively
+at 900,000 bytes. Some PDFs/images do not compress enough and are rejected.
 
-### `package.json` (Already provided, but ensuring it's complete)
-{
-  "name": "medicare-plus-react-v2-0",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "lint": "eslint .",
-    "preview": "vite preview"
-  },
-  "dependencies": {
-    "chart.js": "^4.5.1",
-    "firebase": "^12.9.0",
-    "jspdf": "^4.2.0",
-    "react": "^19.2.0",
-    "react-chartjs-2": "^5.3.1",
-    "react-dom": "^19.2.0",
-    "react-hot-toast": "^2.6.0",
-    "react-router-dom": "^7.13.0",
-    "jspdf-autotable": "^3.5.29",
-    "@fortawesome/fontawesome-svg-core": "^6.5.1",
-    "@fortawesome/free-solid-svg-icons": "^6.5.1",
-    "@fortawesome/react-fontawesome": "^0.2.0",
-    "date-fns": "^2.30.0",
-    "fuse.js": "^7.0.0",
-    "pako": "^2.1.0",
-    "react-phone-input-2": "^2.15.1",
-    "react-select": "^5.8.0",
-    "recharts": "^2.10.3",
-    "emoji-picker-react": "^4.5.0",
-    "react-datepicker": "^4.21.0"
-  },
-  "devDependencies": {
-    "@eslint/js": "^9.39.1",
-    "@types/react": "^19.2.7",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.1.1",
-    "autoprefixer": "^10.4.24",
-    "eslint": "^9.39.1",
-    "eslint-plugin-react-hooks": "^7.0.1",
-    "eslint-plugin-react-refresh": "^0.4.24",
-    "globals": "^16.5.0",
-    "postcss": "^8.5.6",
-    "tailwindcss": "^3.4.19",
-    "vite": "^7.3.1"
-  }
-}
+Base64 is **not encryption**. Client checksums are integrity checks, not malware
+scanning or proof of payment authenticity. Firestore rules cannot decompress files.
+No Cloud Functions, Firebase Storage or fake background automation is used.
+Scheduled work, trustworthy IP/login telemetry, payment settlement, immutable external
+audit trails and point-in-time backups cannot be guaranteed by a browser-only app.
+
+## Deployment
+
+Do not deploy until the dashboard migration, positive/negative workflow tests,
+dependency review and hospital-policy approval are complete. Then deploy the rules
+and indexes to the approved project and use Vercel for the Vite build. Never send
+service account JSON, administrator passwords or maintenance backups to Vercel.

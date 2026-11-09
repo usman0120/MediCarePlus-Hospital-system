@@ -7,21 +7,25 @@ import { AuthProvider } from './context/auth/index.js'; // Added .jsx extension
 import { Toaster } from 'react-hot-toast';
 
 const cleanupServiceWorker = async () => {
-  if (import.meta.env.DEV && typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+  if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
     const registrations = await navigator.serviceWorker.getRegistrations();
     if (registrations.length === 0) {
       return;
     }
 
-    await Promise.all(registrations.map((reg) => reg.unregister()));
-
-    if (navigator.serviceWorker.controller) {
-      window.location.reload();
-    }
+    const legacy = registrations.filter(reg => [reg.active, reg.waiting, reg.installing].some(worker => {
+      if (!worker) return false;
+      const url = new URL(worker.scriptURL);
+      return url.origin === window.location.origin && url.pathname === '/sw.js';
+    }));
+    await Promise.all(legacy.map(reg => reg.update()));
   }
 };
 
-cleanupServiceWorker();
+cleanupServiceWorker().catch(() => {
+  // Do not interrupt authentication or force a reload while users enter data.
+  console.warn('The legacy offline worker could not be updated. Refresh after reconnecting.');
+});
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>

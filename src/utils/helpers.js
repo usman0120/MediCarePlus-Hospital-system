@@ -1,6 +1,5 @@
 import 'jspdf';
 import 'jspdf-autotable';
-import 'jspdf-autotable';
 import pako from 'pako';
 import Fuse from 'fuse.js';
 import toast from 'react-hot-toast';
@@ -174,8 +173,8 @@ export const validateEmail = (email) => {
 };
 
 export const validatePhone = (phone) => {
-  const re = /^\+?[1-9]\d{1,14}$/; // E.164 format
-  return re.test(phone);
+  const digits = String(phone ?? '').replace(/[\s()+-]/g, '').replace(/^0(?=3)/, '92');
+  return /^923\d{9}$/.test(digits);
 };
 
 export const validateCNIC = (cnic) => {
@@ -184,9 +183,7 @@ export const validateCNIC = (cnic) => {
 };
 
 export const validatePassword = (password) => {
-  // At least 8 characters, 1 uppercase, 1 lowercase, 1 number, 1 special character
-  const re = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z\d]).{8,}$/;
-  return re.test(password);
+  return typeof password === 'string' && password.length >= 12 && password.length <= 128;
 };
 
 export const validateVitals = (vitals) => {

@@ -177,7 +177,7 @@ export const AUDIT_ACTIONS = {
 
 // Alert Types
 export const ALERT_TYPES = {
-  LOW_STock: 'LOW_STOCK',
+  LOW_STOCK: 'LOW_STOCK',
   HIGH_BED_OCCUPANCY: 'HIGH_BED_OCCUPANCY',
   EMERGENCY_SPIKE: 'EMERGENCY_SPIKE',
   LAB_OVERLOAD: 'LAB_OVERLOAD',
@@ -382,3 +382,19 @@ export const SUCCESS_MESSAGES = {
   DISCHARGED: 'Patient discharged successfully.',
   COMPLETED: 'Operation completed successfully.'
 };
+
+export const SCHEMA_VERSION = 2;
+export const HOSPITAL_TIME_ZONE = 'Asia/Karachi';
+export const COLLECTIONS = Object.freeze([
+  'users', 'appointments', 'visits', 'invoices', 'beds', 'inventory',
+  'labRequests', 'operations', 'attendance', 'salaryRecords', 'chats',
+  'messages', 'auditLogs', 'departments', 'ratings',
+]);
+// Leave room for metadata below Firestore's 1 MiB document limit.
+export const MAX_ATTACHMENT_BASE64_LENGTH = 600_000;
+export const MAX_DOCUMENT_BYTES = 900_000;
+// Hospital policy approved by the project owner; configurable per staff member.
+export const DEFAULT_PAYROLL_POLICY = Object.freeze({
+  divisor: 26, version: 1, workingWeekdays: Object.freeze([1, 2, 3, 4, 5, 6]),
+  paidLeave: true, lateDeductionDays: 0, halfDayDeductionDays: 0.5,
+});

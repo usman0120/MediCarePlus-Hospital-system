@@ -11,8 +11,8 @@ import Dashboard from './pages/Dashboard';
 import Patient from './pages/Patient';
 import Doctor from './pages/Doctor';
 import Admin from './pages/Admin';
+import Lab from './pages/Lab';
 import Reception from './pages/Receptionist';
-import Accountant from './pages/Accountant';
 import ForgotPassword from './pages/ForgotPassword';
 
 // NEW PUBLIC PAGES IMPORTS
@@ -86,13 +86,9 @@ function App() {
               <Reception />
             </ProtectedRoute>
           } />
+
+          <Route path="/lab/*" element={<ProtectedRoute allowedRoles={['lab']}><Lab /></ProtectedRoute>} />
           
-          {/* Accountant Route */}
-          <Route path="/accountant/*" element={
-            <ProtectedRoute allowedRoles={['accountant']}>
-              <Accountant />
-            </ProtectedRoute>
-          } />
 
           {/* Catch all - redirect to home */}
           <Route path="*" element={<Navigate to="/" replace />} />

@@ -3,7 +3,7 @@ import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 
 const ProtectedRoute = ({ children, allowedRoles = [] }) => {
-  const { isAuthenticated, userDetails, loading } = useAuth();
+  const { isAuthenticated, userDetails, loading, authError, mfaVerified } = useAuth();
   const location = useLocation();
 
   if (loading) {
@@ -14,7 +14,9 @@ const ProtectedRoute = ({ children, allowedRoles = [] }) => {
     );
   }
 
-  if (!isAuthenticated) {
+  if (authError) return <main className="p-6" role="alert">{authError}<button onClick={() => window.location.reload()} className="ml-3 underline">Retry</button></main>;
+
+  if (!isAuthenticated || userDetails?.role === 'admin' && !mfaVerified) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 

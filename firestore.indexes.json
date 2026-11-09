@@ -1,69 +1,41 @@
 {
   "indexes": [
-    {
-      "collectionGroup": "appointments",
-      "queryScope": "COLLECTION",
-      "fields": [
-        {
-          "fieldPath": "patientId",
-          "order": "ASCENDING"
-        },
-        {
-          "fieldPath": "date",
-          "order": "DESCENDING"
-        },
-        {
-          "fieldPath": "time",
-          "order": "ASCENDING"
-        }
-      ]
-    },
-    {
-      "collectionGroup": "labRequests",
-      "queryScope": "COLLECTION",
-      "fields": [
-        {
-          "fieldPath": "patientId",
-          "order": "ASCENDING"
-        },
-        {
-          "fieldPath": "status",
-          "order": "ASCENDING"
-        },
-        {
-          "fieldPath": "createdAt",
-          "order": "DESCENDING"
-        }
-      ]
-    },
-    {
-      "collectionGroup": "visits",
-      "queryScope": "COLLECTION",
-      "fields": [
-        {
-          "fieldPath": "patientId",
-          "order": "ASCENDING"
-        },
-        {
-          "fieldPath": "createdAt",
-          "order": "DESCENDING"
-        }
-      ]
-    },
-    {
-      "collectionGroup": "invoices",
-      "queryScope": "COLLECTION",
-      "fields": [
-        {
-          "fieldPath": "patientId",
-          "order": "ASCENDING"
-        },
-        {
-          "fieldPath": "createdAt",
-          "order": "DESCENDING"
-        }
-      ]
-    }
+    { "collectionGroup": "users", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "role", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "appointments", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "kind", "order": "ASCENDING" }, { "fieldPath": "patientId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "appointments", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "kind", "order": "ASCENDING" }, { "fieldPath": "doctorId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "appointments", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "kind", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "appointments", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "kind", "order": "ASCENDING" }, { "fieldPath": "date", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "appointments", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "kind", "order": "ASCENDING" }, { "fieldPath": "doctorId", "order": "ASCENDING" }, { "fieldPath": "date", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "visits", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "patientId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "visits", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "doctorId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "invoices", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "patientId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "invoices", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "invoices", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "patientId", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "labRequests", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "labRequests", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "doctorId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "labRequests", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "patientId", "order": "ASCENDING" }, { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "operations", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "doctorId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "attendance", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "userId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "attendance", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "date", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "salaryRecords", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "userId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "salaryRecords", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "month", "order": "ASCENDING" }, { "fieldPath": "year", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "chats", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "patientId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "chats", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "doctorId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "messages", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "chatId", "order": "ASCENDING" }, { "fieldPath": "timestamp", "order": "DESCENDING" }] },
+    { "collectionGroup": "ratings", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "doctorId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "ratings", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "patientId", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" }] },
+    { "collectionGroup": "auditLogs", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "actorId", "order": "ASCENDING" }, { "fieldPath": "timestamp", "order": "DESCENDING" }] },
+    { "collectionGroup": "auditLogs", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "action", "order": "ASCENDING" }, { "fieldPath": "timestamp", "order": "DESCENDING" }] }
   ],
-  "fieldOverrides": []
+  "fieldOverrides": [
+    { "collectionGroup": "visits", "fieldPath": "prescriptionPdf", "indexes": [] },
+    { "collectionGroup": "invoices", "fieldPath": "paymentProof", "indexes": [] },
+    { "collectionGroup": "invoices", "fieldPath": "items", "indexes": [] },
+    { "collectionGroup": "labRequests", "fieldPath": "result", "indexes": [] },
+    { "collectionGroup": "salaryRecords", "fieldPath": "salaryPdf", "indexes": [] },
+    { "collectionGroup": "messages", "fieldPath": "file", "indexes": [] },
+    { "collectionGroup": "departments", "fieldPath": "doctorProfiles", "indexes": [] },
+    { "collectionGroup": "departments", "fieldPath": "staffProfiles", "indexes": [] },
+    { "collectionGroup": "departments", "fieldPath": "services", "indexes": [] }
+  ]
 }
