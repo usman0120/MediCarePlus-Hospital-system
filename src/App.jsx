@@ -1,101 +1,36 @@
-import React from 'react';
+import { Component, lazy, Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
-import { ThemeProvider } from './context/ThemeProvider';
-import ProtectedRoute from './routes/ProtectedRoute';
+import ProtectedRoute from './routes/ProtectedRoute.jsx';
 
-// Pages
-import Home from './pages/Home';
-import Login from './pages/Login';
-import Register from './pages/Register';
-import Dashboard from './pages/Dashboard';
-import Patient from './pages/Patient';
-import Doctor from './pages/Doctor';
-import Admin from './pages/Admin';
-import Lab from './pages/Lab';
-import Reception from './pages/Receptionist';
-import ForgotPassword from './pages/ForgotPassword';
+const Home = lazy(() => import('./pages/Home.jsx'));
+const Login = lazy(() => import('./pages/Login.jsx'));
+const Register = lazy(() => import('./pages/Register.jsx'));
+const Dashboard = lazy(() => import('./pages/Dashboard.jsx'));
+const Patient = lazy(() => import('./pages/Patient.jsx'));
+const Doctor = lazy(() => import('./pages/Doctor.jsx'));
+const Reception = lazy(() => import('./pages/Reception.jsx'));
+const Lab = lazy(() => import('./pages/Lab.jsx'));
+const Admin = lazy(() => import('./pages/Admin.jsx'));
 
-// NEW PUBLIC PAGES IMPORTS
-import About from './pages/About';
-import Doctors from './pages/Doctors';
-import DoctorProfile from './pages/DoctorProfile';
-import Departments from './pages/Departments';
-import Contact from './pages/Contact';
-import HelpCenter from './pages/HelpCenter';
-
-// NEW LEGAL PAGES IMPORTS
-import PrivacyPolicy from './pages/PrivacyPolicy';
-import TermsConditions from './pages/TermsConditions';
-import CookiesPolicy from './pages/CookiesPolicy';
-import Disclaimer from './pages/Disclaimer';
-
-function App() {
-  return (
-    <ThemeProvider>
-      <div className="app">
-        <Routes>
-          {/* Public Routes - Main Pages */}
-          <Route path="/" element={<Home />} />
-          <Route path="/about" element={<About />} />
-          <Route path="/doctors" element={<Doctors />} />
-          <Route path="/doctor/:id" element={<DoctorProfile />} />
-          <Route path="/departments" element={<Departments />} />
-          <Route path="/contact" element={<Contact />} />
-          
-          {/* Support & Help Pages */}
-          <Route path="/help" element={<HelpCenter />} />
-          
-          {/* Legal & Policy Pages */}
-          <Route path="/privacy-policy" element={<PrivacyPolicy />} />
-          <Route path="/terms" element={<TermsConditions />} />
-          <Route path="/cookies" element={<CookiesPolicy />} />
-          <Route path="/disclaimer" element={<Disclaimer />} />
-          
-          {/* Auth Routes */}
-          <Route path="/login" element={<Login />} />
-          <Route path="/register" element={<Register />} />
-          <Route path="/forgot-password" element={<ForgotPassword />} />
-          
-          {/* Protected Routes */}
-          <Route path="/dashboard" element={
-            <ProtectedRoute>
-              <Dashboard />
-            </ProtectedRoute>
-          } />
-          
-          <Route path="/patient/*" element={
-            <ProtectedRoute allowedRoles={['patient']}>
-              <Patient />
-            </ProtectedRoute>
-          } />
-          
-          <Route path="/doctor/*" element={
-            <ProtectedRoute allowedRoles={['doctor']}>
-              <Doctor />
-            </ProtectedRoute>
-          } />
-          
-          <Route path="/admin/*" element={
-            <ProtectedRoute allowedRoles={['admin']}>
-              <Admin />
-            </ProtectedRoute>
-          } />
-          
-          <Route path="/receptionist/*" element={
-            <ProtectedRoute allowedRoles={['receptionist']}>
-              <Reception />
-            </ProtectedRoute>
-          } />
-
-          <Route path="/lab/*" element={<ProtectedRoute allowedRoles={['lab']}><Lab /></ProtectedRoute>} />
-          
-
-          {/* Catch all - redirect to home */}
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </div>
-    </ThemeProvider>
-  );
+class PortalBoundary extends Component {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() {
+    return this.state.failed ? <main className="p-6" role="alert">The portal could not display this screen. No successful transaction is implied. Reconnect or contact hospital support.
+      <button className="ml-3 underline" onClick={() => window.location.reload()}>Reload portal</button></main> : this.props.children;
+  }
 }
-
-export default App;
+export default function App() {
+  return <PortalBoundary><Suspense fallback={<main className="p-6" role="status">Loading hospital portal…</main>}><Routes>
+    <Route path="/" element={<Home />} /><Route path="/login" element={<Login />} /><Route path="/register" element={<Register />} />
+    <Route path="/forgot-password" element={<Login key="reset-password" initialMethod="reset" />} />
+    <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+    <Route path="/patient/*" element={<ProtectedRoute allowedRoles={['patient']}><Patient /></ProtectedRoute>} />
+    <Route path="/doctor/*" element={<ProtectedRoute allowedRoles={['doctor']}><Doctor /></ProtectedRoute>} />
+    <Route path="/receptionist/*" element={<ProtectedRoute allowedRoles={['receptionist']}><Reception /></ProtectedRoute>} />
+    <Route path="/reception/*" element={<Navigate to="/receptionist" replace />} />
+    <Route path="/lab/*" element={<ProtectedRoute allowedRoles={['lab']}><Lab /></ProtectedRoute>} />
+    <Route path="/admin/*" element={<ProtectedRoute allowedRoles={['admin']}><Admin /></ProtectedRoute>} />
+    <Route path="*" element={<Navigate to="/" replace />} />
+  </Routes></Suspense></PortalBoundary>;
+}

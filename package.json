@@ -3,25 +3,27 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "^1.14.7",
+    "glob": "^14.0.2"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "node --test tests/workflows.test.mjs",
-    "test:rules": "firebase emulators:exec --only firestore,auth --project demo-medicare-foundation \"node --test --test-concurrency=1 tests/firestore.test.mjs tests/database.test.mjs\"",
+    "test:rules": "node scripts/test-emulators.mjs",
     "firebase:reset": "node scripts/reset-firebase.mjs"
   },
   "dependencies": {
-    "@emailjs/browser": "^4.4.1",
     "@fortawesome/fontawesome-svg-core": "^6.5.1",
-    "@fortawesome/free-brands-svg-icons": "^7.2.0",
     "@fortawesome/free-solid-svg-icons": "^6.5.1",
     "@fortawesome/react-fontawesome": "^0.2.6",
     "chart.js": "^4.5.1",
-    "crypto-js": "^4.2.0",
-    "date-fns": "^2.30.0",
-    "emoji-picker-react": "^4.18.0",
     "firebase": "^12.9.0",
     "fuse.js": "^7.0.0",
     "jspdf": "^4.2.1",
@@ -29,18 +31,13 @@
     "pako": "^2.1.0",
     "react": "^19.2.0",
     "react-chartjs-2": "^5.3.1",
-    "react-datepicker": "^9.1.0",
     "react-dom": "^19.2.0",
     "react-hot-toast": "^2.6.0",
-    "react-phone-input-2": "^2.15.1",
-    "react-router-dom": "^7.13.0",
-    "react-select": "^5.8.0",
-    "recharts": "^2.10.3"
+    "react-router-dom": "^7.13.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
     "@firebase/rules-unit-testing": "^5.0.2",
-    "@types/crypto-js": "^4.2.2",
     "@types/node": "^25.4.0",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
@@ -51,6 +48,7 @@
     "eslint-plugin-react-refresh": "^0.4.24",
     "firebase-admin": "^14.5.0",
     "globals": "^16.5.0",
+    "playwright": "^1.65.0",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.19",
     "vite": "^7.3.1"

@@ -94,5 +94,5 @@ if (args.includes('--apply')) {
   if (finalUsers.users.length !== 1 || finalUsers.users[0].uid !== admin.uid || finalUsers.pageToken) {
     throw new Error('Reset verification failed: another account exists. Review the project before use.');
   }
-  console.log('Reset complete. One administrator remains. Verify its email and enroll real TOTP before using privileged features.');
+  console.log('Reset complete. One administrator remains. Verify its email and use the approved password-only login policy. Remove any pre-existing MFA enrollment in Firebase Console if necessary.');
 }

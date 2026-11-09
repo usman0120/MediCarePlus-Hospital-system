@@ -1,9 +1,9 @@
 import React from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
-import { useAuth } from '../hooks/useAuth';
+import { useAuth } from '../context/AuthContext.jsx';
 
 const ProtectedRoute = ({ children, allowedRoles = [] }) => {
-  const { isAuthenticated, userDetails, loading, authError, mfaVerified } = useAuth();
+  const { isAuthenticated, userDetails, loading, authError, adminPasswordAuthenticated } = useAuth();
   const location = useLocation();
 
   if (loading) {
@@ -16,7 +16,7 @@ const ProtectedRoute = ({ children, allowedRoles = [] }) => {
 
   if (authError) return <main className="p-6" role="alert">{authError}<button onClick={() => window.location.reload()} className="ml-3 underline">Retry</button></main>;
 
-  if (!isAuthenticated || userDetails?.role === 'admin' && !mfaVerified) {
+  if (!isAuthenticated || userDetails?.role === 'admin' && !adminPasswordAuthenticated) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 

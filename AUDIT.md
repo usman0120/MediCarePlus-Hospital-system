@@ -1,157 +1,136 @@
-# Remediation audit
+# MediCare Plus remediation audit
 
-This is a source-code audit, not a production/security certification. Remote
-hospital data was not inspected. Test/reset permissions do not establish Firebase
-project-owner access. Findings are grouped by impact and remediation stage.
+Source-code remediation and local verification, **not clinical/security certification**.
+No real patient data was inspected. No remote Firebase reset, user provisioning,
+rules deployment or index deployment has been performed.
 
-## Critical findings
+## Resolved source-code findings
 
-| Finding | Location | Status |
-| --- | --- | --- |
-| Unauthenticated, unrestricted database writes/reads | `firestore.rules` | Replaced locally; **not deployed** |
-| Public admin registration protected only by a bundled gate password | `src/pages/Register.jsx`, `src/auth.js` | Removed |
-| Admin authorization by matching a hardcoded email | `src/context/auth/AuthProvider.jsx` | Removed; role + active status + real MFA claim |
-| Browser-exposed admin credentials | `.env`, old README | Removed locally; rotate any previously deployed credentials |
-| Account creation signs administrator/reception in as the new user | `src/auth.js` | Isolated in-memory secondary Auth instance |
-| Registration accepts arbitrary roles and profile edits can alter roles/salary | old `src/auth.js`, legacy database exports | New registration restricted; V2 whitelists + rules; legacy consumers still need migration |
-| Appointment query-check followed by an independent write allows double-booking | legacy `createAppointment` / reschedule methods | V2 deterministic slot transactions implemented; legacy UI not migrated |
-| Revenue is counted on unpaid invoice creation and may be counted again on confirmation | competing legacy invoice/appointment payment flows | V2 records revenue only in confirmed payment transaction |
-| Paid invoices and paid payroll can be overwritten | legacy database methods | V2 locks/transitions and deny rules; legacy consumers pending |
-| Inventory deducted at scheduling and again at operation start | `database.js`, old `utils/transactions.js` | V2 deducts only at start; old transaction duplication removed |
-| Transaction reads occur after writes | legacy visit completion, operation, salary and bed-transfer flows | V2 reads precede all writes |
+| Finding | Remediation |
+| --- | --- |
+| Public unrestricted Firestore rules | Replaced with role/identity/ownership, validation, record-locking and transaction-link rules; still must be deployed by the owner |
+| Public admin registration and bundled credentials | Removed; only patient self-registration remains |
+| Administrator/reception session replaced during staff creation | Isolated secondary, in-memory Auth instance; emulator connection follows the primary Auth instance |
+| Paid Auth/MFA conflict | Owner explicitly changed the requirement to verified email/password for admin; no MFA, fake OTP or server verifier is added |
+| Competing database exports and collections | Removed over 12,000 lines of legacy database paths; all active SDK database operations live in `src/database.js` |
+| Duplicate appointment/payment/salary/EMR widgets | Consolidated into one V2 workflow and shared validated controls |
+| Human accountant, pricing proposals, fake financial accounts | Removed from the UI, routes, data access and dependencies |
+| Double booking and rescheduling races | Deterministic slot markers and atomic reservation/rescheduling/release |
+| Payment revenue counted twice or before receipt | Revenue updates only in the receipt-confirmation transaction; paid invoices are immutable |
+| Paid salary overwritten/reprocessed | Deterministic monthly records, frozen attendance and atomic payout checks |
+| Fixed-divisor overpayment and invalid calendar dates | Actual calendar days and base-minus-explicit-deductions under the approved 26-day policy |
+| Inventory deducted on scheduling and again on start | Deduct only at operation start, together with billing and audit |
+| Transaction reads after writes / query reads masquerading as isolated transaction reads | Explicit document reads before writes; deterministic attendance document reads |
+| Clinical counters changed independently | Require the corresponding lab/operation creation/completion/cancellation in the same transaction |
+| Lab/reception unnecessarily reading EMR | Update only the required visit links/counters; no EMR read access for those actors |
+| File payloads too large / silent corrupt downloads | Compressed Base64, conservative size caps, signatures and SHA-256 checks; download integrity verification |
+| Chat duplicate sends and broken read receipts | Deterministic conversation/request IDs, atomic send/counter updates, monotonic receipts and retries of the same request |
+| Doctor availability auto-reply impersonation | Explicit, server-validated automatic notice derived from the doctor's configured hours, not a fabricated doctor message |
+| Invoice cancellation mutates unrelated charges | Exact original lab-line removal with matching source/counter transition |
+| Token refresh destroys unsaved clinical drafts | Same-identity token refresh no longer clears the workspace; EMR revisions detect conflicting edits |
+| Emergency cases forced through routine booking | Immediate assessed intake, one pending case per patient, explicit dismissal, and severity/FIFO server pagination |
+| Invalid field-to-field low-stock query | Maintain `lowStock` transactionally and use actual stock/threshold values |
+| Unbounded fallback scans and fake empty successes | Bounded subscriptions/pages, explicit errors and capped browser exports; reports use server aggregates |
+| Duplicate PDFs and marketing/fake QR/telephone content | One jsPDF component and a factual portal landing page; unapproved legal/marketing boilerplate removed |
+| Multiple auth/theme contexts and deep component folders | One `context/AuthContext.jsx`; requested shallow page/component layout |
+| Fake PWA/background `/api` synchronization | Retired old worker at its original URL; no nonexistent endpoint queues or silent deletion of old offline data |
+| Huge eager bundles and external font loading | Lazy role/PDF/chart loading, smaller CSS, system fonts, scoped vendor chunks |
+| Unused dependencies and known vulnerabilities | Removed unused widgets/charts/crypto/email packages; pinned patched gRPC/glob leaves through tested overrides |
+| Weak browser/deployment defaults | CSP, anti-framing, no-referrer, HSTS, popup-compatible COOP and restrictive permissions policy |
+| Windows emulator remains running after CLI shutdown | Test runner tracks only its own exact demo-project Java process and cleans it up; refuses occupied ports without killing unrelated processes |
 
-## Data consistency and workflow issues
+## Current architecture
 
-- `getDocs(query(...))` inside `runTransaction` is not a transaction read. Legacy
-  active-visit and payroll checks therefore did not protect against concurrent edits.
-- Random monthly salary IDs allow duplicates; some legacy calculations reset paid
-  records to pending. V2 uses deterministic employee/month IDs and immutable totals.
-- Multiplying attendance by `salary / 26` overpays a 27-day month. V2 uses full base
-  salary minus explicit policy deductions; joining/leaving proration is documented.
-- Attendance used invalid end dates such as February 31 and different staff sources.
-  V2 reads actual dates, one staff source and explicit employment dates.
-- Missing payroll policy, missing attendance, unpaid/pending/processed status aliases,
-  hardcoded tax/consultation/lab prices and cash promises treated as payment caused
-  inconsistent financial reporting. V2 rejects missing policy and unconfirmed money.
-- Appointment statuses differ across modules (`pending`, `approved`, `scheduled`,
-  `confirmed`, `completed`); V2 defines explicit transitions. UI migration is required.
-- EMR field names differ (`prescriptions`, `prescription`, notes arrays/strings, `temp`
-  and `temperature`). V2 uses the structured required format and revision checks.
-- Bed assignment did not consistently validate patient, visit and billing linkage;
-  release did not consistently settle the admission’s charges. V2 updates links and
-  charges atomically, with one invoice per visit.
-- Lab result upload and discharge need outstanding-work checks. V2 tracks counts;
-  cancellation/completion and discharge must be tested together.
-- Chat creation used query-then-create, allowing duplicate conversations. Sending,
-  retries and unread counters were independent writes. V2 uses deterministic chats
-  and request IDs, transaction sends and incremental receipts.
-- Legacy read-receipt batches reset counters regardless of concurrent messages.
-  V2 subtracts only newly seen messages; adversarial counter validation still needs
-  expanded rule tests before certification.
-- Legacy query `where('quantity', '<=', where('threshold'))` is invalid; Firestore
-  cannot compare two document fields. V2 maintains `lowStock` transactionally.
-- `getPendingPayments` and `searchAppointments` shadow SDK `doc`/`query` with local
-  variables; there are runtime failures a production build cannot detect.
-- Fallback queries scan entire collections and sometimes report success with empty
-  data after failures. V2 returns explicit error codes and bounded query pages.
-- N+1 profile reads, huge embedded arrays, no stable pagination and repeated PDF
-  generators increase costs and bundle size. Migration and profiling remain.
-- Login “IP address” was a device platform string. V2 explicitly records IP as
-  unavailable; browser telemetry is not trusted forensic evidence.
-- The cache-first service worker attempted to synchronize messages/appointments
-  to nonexistent `/api` endpoints and deleted queued entries without checking
-  successful settlement. Registration removed; `public/sw.js` now retires the old
-  worker and removes only its own caches. No fake offline synchronization remains
-  in that worker. Existing offline IndexedDB queues are not silently deleted.
+- React/Vite, Tailwind, FontAwesome, Chart.js, jsPDF, Context API.
+- Firebase Auth + Firestore client SDK; transactions and security rules.
+- Collections remain the approved flat set. Settings are a typed `_settings`
+  document inside `departments`; emergency case locks use `appointments`; payroll
+  locks use `attendance`. No new nested collections or fake service endpoints.
+- Clinical/financial documents preserve historical name/price snapshots; current
+  staff/department access and pricing use authoritative IDs/catalogs.
+- Patient/doctor/reception/lab/admin screens call the V2 API, not legacy exports.
+- Chat is participant-only, including against admin/reception access.
+- Browser export deliberately excludes chat/messages. Owner maintenance backup is
+  a separately privileged, offline operation and is not deployed as a backend.
 
-## Unwanted/redundant files and modules (review before deletion)
+## Approved policy changes
 
-These have **not** been broadly deleted. Existing UI imports must be migrated first.
+1. **Admin: verified email/password only.** The owner removed MFA from the requirement.
+   This is weaker than MFA and must not be described as MFA-protected.
+2. No paid Auth provider or Firebase file storage was enabled. Phone SMS sending
+   remains disabled unless the owner later approves/configures it.
+3. Payroll: Monday–Saturday, paid approved leave, no late deduction, half-day
+   deduction 0.5, fixed divisor 26. Missing attendance prevents finalization.
+4. Routine appointments reserve a real configured slot before payment. Emergency
+   intake bypasses routine slots and records the reception assessment.
 
-- Human-accountant page/route and financial role (`src/pages/Accountant.jsx`). Route
-  removed; automation belongs in the shared workflows, not a redundant actor.
-- Separate non-system `departmentStaff`, `doctorStats`, `doctorSchedules`, `accounts`,
-  `transactions`, `inventoryTransactions`, `receipts`, `budgets`, `expenses`, `config`,
-  purchase-order, pricing-proposal, support and notification collections conflict
-  with the requested flat schema. They are denied by the new rules.
-- `PricingControlsModal.jsx`, `PricingApprovals.jsx`, `PricingControls`/approval
-  exports: competing pricing sources instead of department-owned catalog pricing.
-- `HospitalHistoryModal.jsx`, `UserHistoryModal.jsx`, `PatientHistoryModal.jsx`,
-  `PatientHistory`/full-history functions: overlapping history aggregators/PDFs.
-- `ConsultationNotesModal.jsx`, `ViewConsultationNotes.jsx`, `EMRForm.jsx`: competing
-  medical-record shapes. Consolidate into structured EMR, not three note formats.
-- `PaymentModal.jsx`, `PaymentVerificationModal.jsx`, `Invoice.jsx`, payment/receipt
-  and transaction-history code: replace competing flows with one invoice workflow.
-- Nested `components/appointments/`, `context/auth/`, compatibility hooks and duplicate
-  theme-provider files do not match the desired compact structure. Consolidate once
-  their consumers are updated.
-- `.eslintrc.cjs` beside `eslint.config.js`: potentially obsolete configuration.
-- `dist/` is generated output, not source; `node_modules/` is installed dependencies.
-- `API_ENDPOINTS` describes nonexistent HTTP endpoints and is not this architecture.
-- Hardcoded department lists, consultation fee tables, example telephone numbers,
-  fake QR-code rectangles, marketing statistics/testimonials and assertions of
-  production readiness must be removed or replaced with hospital-approved content.
-- Chart.js plus Recharts and duplicate FontAwesome major families increase the
-  dependency/bundle footprint. Retain the required chart/icon stack after migration.
-- EmailJS, crypto-js, emoji-picker, datepicker, phone/select widgets should be retained
-  only if needed by the approved final UX. Base64/crypto-js is not a substitute for
-  trusted access control or a clinical data-protection policy.
+## Deployment and operational blockers
 
-## Deployment blockers
+- Establish project-owner access to `fyp2-175ea`; review a protected backup, then
+  run the explicitly confirmed demo reset/sole-admin tool if desired. Current
+  owner credentials have not been supplied. Code changes do not grant access.
+- Deploy the new rules/indexes and Vercel environment configuration together in
+  staging. Existing remote rules may still be permissive. Do not assume a Git push
+  deploys Firebase rules. Existing Vercel integration may deploy `main` automatically.
+- Rotate credentials previously published in Git history or deployed bundles.
+  Removing current plaintext does not erase historical copies.
+- Set Firebase's server-side password policy, authorized domains and provider
+  configuration. Browser password length checks are not a replacement for Auth
+  console policy. Live Google/email delivery/verification must be smoke-tested.
+- Existing data with old schemas or missing search fields requires an owner-run
+  migration/reset; the app does not fabricate missing metadata or silently mutate
+  old clinical/financial records.
+- Obtain hospital approval for bed-day rounding, employment proration, tax,
+  overtime, leave authorization, refunds/partial payments, equipment/staff resource
+  scheduling, unidentified-patient intake, and linking offline walk-ins to a portal.
+  Payroll currently covers the three approved staff access roles; support employees
+  without portal access need an explicitly agreed model.
+- Uploaded proofs/reports are not malware-scanned. Firestore rules cannot decompress
+  a file or authenticate bank settlement. Receipt confirmation remains the authorized
+  staff member's actual external verification, not a simulated payment gateway.
+- Multilingual PDF fonts need hospital-approved installation/embedding. The PDF
+  generator refuses covered unsupported scripts rather than save unreadable output;
+  original structured data remains intact. No language support is falsely claimed.
+- The fully server-validated prescription is bounded to eight medicine entries
+  under Firestore's 1,000-expression rule budget. Larger prescriptions are rejected,
+  never partially saved/truncated; an approved validation/schema extension is needed
+  before clinical workflows requiring more entries can be accepted.
+- Global doctor search is fuzzy; patient search uses indexed authorized prefixes
+  with fuzzy ranking of bounded candidates. It is not an unlimited full-text engine.
+  Recent/frequent patient lookups are memory-only and reset on identity changes.
+- Browser automation runs only while the admin screen is open. Server aggregates
+  measure actual receipts/assessments/acquisition value; acquisition is not bank
+  settlement. No unattended jobs or trustworthy failed-login/IP forensics are claimed.
+- Browser exports are capped and not atomic point-in-time backups. Perform an
+  encrypted backup/restore drill, access-revocation drill, quota/cost review,
+  regional/legal privacy review and independent security/clinical acceptance test.
+- Enforce/verify CSP with the live Google provider and Vercel deployment. Local
+  browser tests use emulators and do not establish production provider behavior.
 
-1. Project-owner access for `fyp2-175ea`, protected backup, offline reset and sole-admin
-   provisioning. These remote operations have not run.
-2. The owner declined paid Auth features. TOTP enrollment is disabled by default
-   and privileged administrator access remains blocked pending an approved secure
-   alternative. No billing/Identity Platform configuration was changed. Never weaken
-   rules to a simulated OTP to work around this constraint.
-3. Patient/doctor/reception/admin dashboard migration onto `hospital` V2; remove
-   legacy Firestore exports and direct component database writes afterward.
-4. Strict adversarial testing of clinical counters, full prescription schemas,
-   inventory consumption, payment line sources and chat receipt accounting.
-5. Successful operation/bed/payroll and concurrent-edit integration tests, in
-   addition to authorization-denial and basic workflow tests.
-6. Full PDF component integration, compression-before-upload and download checksum
-   validation for all consumers. The legacy generators are not yet consolidated.
-7. The approved payroll default is Mon–Sat, paid leave, no lateness deduction,
-   half-day deduction 0.5, divisor 26. Joining/leaving proration, tax,
-   overtime, cancellation/refund, equipment vs consumable, bed-day and emergency
-   admission policies approved by the hospital.
-8. V2 analytics/search/notifications/messaging-hours UI and configurable alerts.
-   A browser-only app must not pretend to run unattended scheduled jobs.
-9. Dependency vulnerability fixes and retests. Initial installed dependency audit
-   reported 26 advisories, including two critical. Compatible dependency fixes
-   reduced this to 11 (six moderate/five high), with no critical advisories in the
-   last audit. The remaining Firebase 12 Node gRPC pin and Admin SDK transitive
-   advisories need review; no forced Firebase downgrade was applied.
-10. CSP/XSS review, shared-device session/cache review, permissions, backup/restore
-    drill, access revocation, Firestore region and Pakistan clinical/legal privacy
-    review before storing any real patient records.
+## Verification
 
-## Verification notes
+`npm test` covers pure money/calendar/payroll/file validation. `npm run test:rules`
+starts only `demo-medicare-foundation` emulators and executes both real SDK/rule
+tests and a real Chrome browser workflow. Synthetic fixtures are never app data.
+Tests cover concurrency, clinical ownership, invoice/revenue synchronization,
+inventory/bed workflows, monthly payroll locking, chat receipts, emergency intake,
+actual prescription PDF creation and the password-only admin policy.
 
-`npm test` covers money, invoice arithmetic, dates, payroll and compressed-file
-integrity. `npm run test:rules` uses local Firebase emulators and includes both
-unauthorized-request tests and actual V2 API workflow tests. A build/lint pass is
-not proof of real hospital correctness. Record final test results after all fixes.
-
-### Latest verified foundation pass
+### Final verified pass
 
 - `npm test`: **8 passed**.
-- `npm run test:rules`: **12 passed**, including concurrent bookings, operation
-  consumption/billing, bed transfer/release, payroll freezing/payout, clinical
-  ownership, payment confirmation, chat receipts and cross-role access denial.
-- `npm run lint`: passed, including maintenance/test `.mjs` files.
-- `npm run build`: passed; legacy bundle-size/dynamic-import warnings remain.
-- `node --check scripts/reset-firebase.mjs` and `git diff --check`: passed.
-- `npm audit`: 11 remaining advisories (six moderate, five high, zero critical).
+- `npm run test:rules`: **17 passed**, including the real Chrome workflow and
+  the eight-entry prescription boundary, invalid medicine type rejection,
+  missing clinical partner rejection, eight-message delivered/seen batches,
+  staff-session preservation and actual server aggregate totals.
+- `npm run lint`: passed.
+- `npm run build`: passed without mixed-import or oversized-chunk warnings.
+- `npm audit`: **0 known vulnerabilities** at verification time.
+- `git diff --check`: passed. `.env`, maintenance backups and generated browser
+  profiles/downloads are ignored and are not published.
 
-Some malformed denial fixtures still reach Firestore's 1,000-expression evaluation
-limit before rejection. Requests are denied, but this remains a rule-budget and
-boundary-testing issue—not a production certification. Valid tested transactions,
-including the five-consumable operation case, passed.
-
-The installed Java 27 / Firebase CLI combination also left an owned Firestore test
-emulator listening after CLI shutdown. Only the agent-started, exact demo-project
-process was cleaned up. Use a supported Java LTS and review repeat-run cleanup
-before relying on unattended CI. No live Firebase process or data was stopped.
+Some intentionally malformed denial fixtures still report Firestore's expression
+budget before rejection. They are denied; all tested valid boundary transactions
+pass. Additional independent adversarial/load testing is still required before
+clinical certification. These checks do not imply remote deployment, live OAuth
+configuration, bank settlement validation or clinical/privacy approval.

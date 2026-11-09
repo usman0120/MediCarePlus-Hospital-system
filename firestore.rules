@@ -6,24 +6,51 @@ service cloud.firestore {
     function dataPath(name, id) { return /databases/$(database)/documents/$(name)/$(id); }
     function me() { return get(userPath(request.auth.uid)).data; }
     function active() {
-      let profile = signedIn() ? me() : null;
+      let profile = me();
       return signedIn() && request.auth.token.email_verified == true &&
         profile.schemaVersion == 2 && profile.accountStatus == 'active';
     }
-    function role(value) { return active() && me().role == value; }
-    // A browser flag or simulated OTP is NOT MFA. Identity Platform must issue
-    // a second-factor claim before privileged administrator actions are allowed.
+    function role(value) {
+      let profile = me();
+      return signedIn() && request.auth.token.email_verified == true && profile.schemaVersion == 2 && profile.accountStatus == 'active' && profile.role == value;
+    }
+    // Owner-approved password-only administrator policy. No client role flags
+    // or simulated OTPs are trusted; verified identity and protected role apply.
     function admin() {
-      return role('admin') && request.auth.token.firebase.get('sign_in_second_factor', '') == 'totp' &&
-        request.auth.token.firebase.sign_in_provider == 'password';
+      return role('admin') && request.auth.token.firebase.sign_in_provider == 'password';
     }
     function reception() { return role('receptionist') || admin(); }
     function staff() { return active() && me().role in ['doctor', 'receptionist', 'lab'] || admin(); }
     function bounded() { return request.query.limit != null && request.query.limit <= 100; }
     function text(value, maximum) { return value is string && value.size() <= maximum; }
-    function id(value) { return value is string && value.matches('^[A-Za-z0-9_-]{1,128}$'); }
+    function id(value) { return value is string && value.matches('^[A-Za-z0-9_-]{1,512}$'); }
     function minor(value) { return value is int && value >= 0 && value <= 100000000000; }
-    function date(value) { return value is string && value.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'); }
+    function validDate(value) {
+      return value is string && value.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+        timestamp.date(int(value.split('-')[0]), int(value.split('-')[1]), int(value.split('-')[2])).day() == int(value.split('-')[2]);
+    }
+    function optionalNumber(value, maximum) { return value == null || value is number && value >= 0 && value <= maximum; }
+    function validPressure(value) {
+      return value == '' || value is string && value.matches('^[0-9]{2,3}/[0-9]{2,3}$') &&
+        int(value.split('/')[0]) >= 40 && int(value.split('/')[0]) <= 300 && int(value.split('/')[1]) >= 20 && int(value.split('/')[1]) <= 200 &&
+        int(value.split('/')[0]) > int(value.split('/')[1]);
+    }
+    function medicine(m, allowed) {
+      // One bounded tuple match avoids exhausting Firestore's expression budget
+      // on a full supported prescription. String addition rejects non-strings;
+      // the delimiter is forbidden within clinical fields.
+      return m.keys().hasOnly(allowed) &&
+        (m.name + '\u0000' + m.dose + '\u0000' + m.frequency + '\u0000' + m.duration + '\u0000' + m.instructions)
+          .matches('^[^\\s\u0000][^\u0000]{0,149}\u0000[^\\s\u0000][^\u0000]{0,99}\u0000[^\\s\u0000][^\u0000]{0,99}\u0000[^\\s\u0000][^\u0000]{0,99}\u0000[^\u0000]{0,500}$');
+    }
+    function prescription(p) {
+      let n = p.size();
+      let allowed = ['name', 'dose', 'frequency', 'duration', 'instructions'];
+      return p is list && n <= 8 &&
+        (n < 1 || medicine(p[0], allowed)) && (n < 2 || medicine(p[1], allowed)) && (n < 3 || medicine(p[2], allowed)) &&
+        (n < 4 || medicine(p[3], allowed)) && (n < 5 || medicine(p[4], allowed)) && (n < 6 || medicine(p[5], allowed)) &&
+        (n < 7 || medicine(p[6], allowed)) && (n < 8 || medicine(p[7], allowed));
+    }
     function file(value) {
       return value is map && value.keys().hasOnly(['name', 'mimeType', 'encoding', 'originalBytes', 'base64', 'sha256']) &&
         text(value.name, 150) && value.name.size() > 0 && value.encoding == 'gzip-base64' &&
@@ -57,6 +84,14 @@ service cloud.firestore {
       let visit = get(dataPath('visits', id)).data;
       return visit.status == 'active' && visit.locked == false && visit.doctorId == request.auth.uid;
     }
+    function linkedClinicalCounter(d, visitId, collectionName, counter, addAction, completeAction, cancelAction) {
+      let entry = getAfter(dataPath('auditLogs', d.lastAuditId)).data;
+      let source = getAfter(dataPath(collectionName, entry.targetId)).data;
+      return entry.targetCollection == collectionName && source.visitId == visitId &&
+        (entry.action == addAction && source.status in ['pending', 'scheduled'] && d[counter] == resource.data[counter] + 1 ||
+         entry.action in [completeAction, cancelAction] && source.status in ['completed', 'cancelled'] &&
+          get(dataPath(collectionName, entry.targetId)).data.status in ['pending', 'in-progress', 'scheduled'] && d[counter] == resource.data[counter] - 1);
+    }
 
     match /users/{uid} {
       function validProfile(d) {
@@ -66,55 +101,77 @@ service cloud.firestore {
           (d.phone == '' || d.phone.matches('^[+]923[0-9]{9}$')) &&
           (d.emergencyContact == '' || d.emergencyContact.matches('^[+]923[0-9]{9}$')) &&
           (d.cnic == '' || d.cnic.matches('^[0-9]{5}-[0-9]{7}-[0-9]$')) &&
-          (d.dateOfBirth == '' || date(d.dateOfBirth)) &&
+          (d.dateOfBirth == '' || validDate(d.dateOfBirth)) &&
           d.gender in ['', 'male', 'female', 'other'] &&
           d.bloodGroup in ['', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'] &&
           text(d.address, 500) && minor(d.baseSalaryMinor) && d.accountStatus in ['active', 'disabled'] &&
+          d.get('careTeamIds', []) is list && d.get('careTeamIds', []).size() <= 50 &&
+          d.get('treatedDoctorIds', []) is list && d.get('treatedDoctorIds', []).size() <= 50 &&
           d.keys().hasOnly(['uid', 'email', 'role', 'fullName', 'phone', 'cnic', 'dateOfBirth', 'gender', 'address',
             'emergencyContact', 'bloodGroup', 'accountStatus', 'activeVisitId', 'currentBedId', 'departmentId',
-            'department', 'specialization', 'licenseNumber', 'baseSalaryMinor', 'employmentStartDate', 'employmentEndDate', 'careTeamIds',
+            'department', 'specialization', 'licenseNumber', 'baseSalaryMinor', 'employmentStartDate', 'employmentEndDate', 'careTeamIds', 'treatedDoctorIds', 'pendingEmergencyId', 'fullNameSearch', 'lastAuthAuditId',
             'payrollPolicy', 'schemaVersion', 'revision', 'createdAt', 'createdBy', 'updatedAt', 'updatedBy',
             'lastAuditId', 'lastLogin', 'statusReason']);
       }
       function canRead() {
         return signedIn() && (request.auth.uid == uid || admin() || role('receptionist') && resource.data.role == 'patient' ||
-          role('doctor') && resource.data.role == 'patient' && resource.data.careTeamIds.hasAny([request.auth.uid]));
+          role('doctor') && resource.data.role == 'patient' && (resource.data.careTeamIds.hasAny([request.auth.uid]) || resource.data.get('treatedDoctorIds', []).hasAny([request.auth.uid])));
       }
-      allow get: if canRead();
-      allow list: if bounded() && (admin() || role('receptionist') && resource.data.role == 'patient');
+      allow get: if canRead() || reception() && !exists(userPath(uid));
+      allow list: if admin() || role('doctor') && resource.data.role == 'patient' &&
+        (resource.data.careTeamIds.hasAny([request.auth.uid]) || resource.data.get('treatedDoctorIds', []).hasAny([request.auth.uid])) || bounded() && role('receptionist') && resource.data.role == 'patient';
       allow create: if signedIn() && validProfile(request.resource.data) && createStamp(request.resource.data) &&
         request.resource.data.role != 'admin' && request.resource.data.accountStatus == 'active' &&
         request.resource.data.activeVisitId == null && request.resource.data.currentBedId == null &&
-        audit(request.resource.data, ['USER_REGISTERED', 'STAFF_CREATED']) &&
+        request.resource.data.careTeamIds == [] && request.resource.data.get('treatedDoctorIds', []) == [] &&
+        audit(request.resource.data, ['USER_REGISTERED', 'STAFF_CREATED', 'PATIENT_REGISTERED']) &&
         (uid == request.auth.uid && request.resource.data.role == 'patient' && request.resource.data.email == request.auth.token.email &&
           request.resource.data.baseSalaryMinor == 0 && request.resource.data.departmentId == null ||
          admin() || role('receptionist') && request.resource.data.role == 'patient');
-      allow update: if signedIn() && request.resource.data.role == resource.data.role && validProfile(request.resource.data) && (
+      allow update: if signedIn() && request.resource.data.role == resource.data.role && (
         // Login timestamp is recorded atomically with a corresponding auth audit.
-        request.auth.uid == uid && active() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastLogin']) &&
-          request.resource.data.lastLogin == request.time ||
+        request.auth.uid == uid && active() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastLogin', 'lastAuthAuditId']) &&
+          request.resource.data.lastLogin == request.time &&
+          getAfter(dataPath('auditLogs', request.resource.data.lastAuthAuditId)).data.action == 'USER_LOGIN' &&
+          getAfter(dataPath('auditLogs', request.resource.data.lastAuthAuditId)).data.actorId == uid ||
         updateStamp(request.resource.data) && (
-          (request.auth.uid == uid && active() || reception() && resource.data.role == 'patient') &&
-            changedOnly(['fullName', 'phone', 'cnic', 'dateOfBirth', 'gender', 'address', 'emergencyContact', 'bloodGroup']) &&
+          changedOnly(['fullName', 'fullNameSearch', 'phone', 'cnic', 'dateOfBirth', 'gender', 'address', 'emergencyContact', 'bloodGroup']) &&
+            (request.auth.uid == uid && active() || reception() && resource.data.role == 'patient') && validProfile(request.resource.data) &&
             audit(request.resource.data, ['PROFILE_UPDATED']) ||
-          (request.auth.uid == uid && role('patient') || reception()) && resource.data.role == 'patient' && changedOnly(['careTeamIds']) &&
+          changedOnly(['careTeamIds']) && resource.data.role == 'patient' && (request.auth.uid == uid && role('patient') || reception()) &&
             request.resource.data.careTeamIds is list && request.resource.data.careTeamIds.size() <= 50 &&
             audit(request.resource.data, ['APPOINTMENT_CREATED']) &&
             request.resource.data.careTeamIds.toSet() == resource.data.careTeamIds.toSet().union([
               getAfter(dataPath('appointments', getAfter(dataPath('auditLogs', request.resource.data.lastAuditId)).data.targetId)).data.doctorId].toSet()) ||
-          admin() && resource.data.role in ['doctor', 'receptionist', 'lab'] &&
-            changedOnly(['accountStatus', 'statusReason', 'baseSalaryMinor', 'payrollPolicy']) &&
+          changedOnly(['accountStatus', 'statusReason', 'baseSalaryMinor', 'payrollPolicy']) && admin() && resource.data.role in ['doctor', 'receptionist', 'lab'] &&
+            request.resource.data.accountStatus in ['active', 'disabled'] && minor(request.resource.data.baseSalaryMinor) &&
             audit(request.resource.data, ['STAFF_STATUS_CHANGED', 'PAYROLL_POLICY_UPDATED']) ||
-          role('doctor') && resource.data.role == 'patient' && changedOnly(['activeVisitId']) &&
+          changedOnly(['fullName', 'fullNameSearch', 'phone', 'specialization', 'licenseNumber', 'employmentStartDate', 'employmentEndDate']) && admin() && resource.data.role in ['doctor', 'receptionist', 'lab'] &&
+            validProfile(request.resource.data) &&
+            validDate(request.resource.data.employmentStartDate) &&
+            (request.resource.data.employmentEndDate == null || validDate(request.resource.data.employmentEndDate) && request.resource.data.employmentEndDate >= request.resource.data.employmentStartDate) &&
+            audit(request.resource.data, ['STAFF_EDITED']) ||
+          changedOnly(['pendingEmergencyId', 'careTeamIds']) && reception() && resource.data.role == 'patient' &&
+            audit(request.resource.data, ['EMERGENCY_ADMITTED', 'EMERGENCY_DISMISSED']) && (
+              request.resource.data.pendingEmergencyId != null && resource.data.get('pendingEmergencyId', null) == null &&
+                getAfter(dataPath('appointments', request.resource.data.pendingEmergencyId)).data.patientId == uid &&
+                getAfter(dataPath('appointments', request.resource.data.pendingEmergencyId)).data.isEmergency == true &&
+                getAfter(dataPath('appointments', request.resource.data.pendingEmergencyId)).data.status == 'checked-in' &&
+                request.resource.data.careTeamIds.toSet() == resource.data.careTeamIds.toSet().union([getAfter(dataPath('appointments', request.resource.data.pendingEmergencyId)).data.doctorId].toSet()) ||
+              request.resource.data.pendingEmergencyId == null && getAfter(dataPath('appointments', resource.data.pendingEmergencyId)).data.status == 'cancelled') ||
+          changedOnly(['activeVisitId', 'treatedDoctorIds', 'pendingEmergencyId']) && role('doctor') && resource.data.role == 'patient' &&
             audit(request.resource.data, ['VISIT_CREATED', 'VISIT_DISCHARGED']) && (
               request.resource.data.activeVisitId != null &&
                 getAfter(dataPath('visits', request.resource.data.activeVisitId)).data.patientId == uid &&
                 getAfter(dataPath('visits', request.resource.data.activeVisitId)).data.doctorId == request.auth.uid &&
-                getAfter(dataPath('visits', request.resource.data.activeVisitId)).data.status == 'active' ||
+                getAfter(dataPath('visits', request.resource.data.activeVisitId)).data.status == 'active' &&
+                (resource.data.get('pendingEmergencyId', null) == null || resource.data.pendingEmergencyId == request.resource.data.activeVisitId && request.resource.data.pendingEmergencyId == null) &&
+                request.resource.data.treatedDoctorIds.toSet() == resource.data.get('treatedDoctorIds', []).toSet().union([request.auth.uid].toSet()) ||
               request.resource.data.activeVisitId == null &&
                 getAfter(dataPath('visits', resource.data.activeVisitId)).data.status == 'discharged' &&
-                getAfter(dataPath('visits', resource.data.activeVisitId)).data.locked == true) ||
-          reception() && resource.data.role == 'patient' && changedOnly(['currentBedId']) &&
+                getAfter(dataPath('visits', resource.data.activeVisitId)).data.locked == true &&
+                request.resource.data.get('treatedDoctorIds', []) == resource.data.get('treatedDoctorIds', [])) ||
+          changedOnly(['currentBedId']) && reception() && resource.data.role == 'patient' &&
             audit(request.resource.data, ['BED_ASSIGNED', 'BED_RELEASED']) && (
               request.resource.data.currentBedId != null && getAfter(dataPath('beds', request.resource.data.currentBedId)).data.patientId == uid ||
               request.resource.data.currentBedId == null && getAfter(dataPath('beds', resource.data.currentBedId)).data.patientId == null)
@@ -124,6 +181,25 @@ service cloud.firestore {
     }
 
     match /departments/{departmentId} {
+      function validSettings(d) {
+        return d.kind == 'settings' && d.active == false && d.labCapacity is int && d.labCapacity > 0 && d.labCapacity <= 100000 &&
+          d.emergencyThreshold is int && d.emergencyThreshold > 0 && d.emergencyThreshold <= 100000;
+      }
+      function validHours(h) {
+        return h is map && h.keys().hasOnly(['days', 'start', 'end', 'autoReply']) && h.days is list && h.days.size() > 0 && h.days.size() <= 7 &&
+          h.days.toSet().size() == h.days.size() && h.days.hasOnly([0, 1, 2, 3, 4, 5, 6]) && h.start.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$') &&
+          h.end.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$') && h.start < h.end && text(h.autoReply, 500) && h.autoReply.size() > 0;
+      }
+      function ownDoctorProjection(d) {
+        let before = resource.data.doctorProfiles[request.auth.uid];
+        let after = d.doctorProfiles[request.auth.uid];
+        return role('doctor') && d.doctorProfiles.diff(resource.data.doctorProfiles).affectedKeys().hasOnly([request.auth.uid]) && (
+          changedOnly(['doctorProfiles']) && after.diff(before).affectedKeys().hasOnly(['messagingHours']) && validHours(after.messagingHours) && audit(d, ['MESSAGING_HOURS_UPDATED']) ||
+          changedOnly(['doctorProfiles', 'staffProfiles']) && after.diff(before).affectedKeys().hasOnly(['fullName']) &&
+          d.staffProfiles.diff(resource.data.staffProfiles).affectedKeys().hasOnly([request.auth.uid]) &&
+          d.staffProfiles[request.auth.uid].diff(resource.data.staffProfiles[request.auth.uid]).affectedKeys().hasOnly(['fullName']) &&
+          after.fullName == getAfter(userPath(request.auth.uid)).data.fullName && d.staffProfiles[request.auth.uid].fullName == after.fullName && audit(d, ['PROFILE_UPDATED']));
+      }
       function valid(d) {
         return text(d.name, 100) && d.name.size() > 0 && d.active is bool && d.emergencyEnabled is bool &&
           d.doctorIds is list && d.doctorIds.size() <= 100 && d.doctorProfiles is map && d.staffProfiles is map &&
@@ -131,28 +207,46 @@ service cloud.firestore {
           d.revenue == d.revenueMinor / 100.0 && d.collectedRevenue == d.revenue &&
           d.keys().hasOnly(['name', 'active', 'emergencyEnabled', 'headDoctorId', 'doctorIds', 'doctorProfiles', 'staffProfiles',
             'services', 'revenueMinor', 'revenue', 'collectedRevenue', 'lastPaidInvoiceId', 'schemaVersion', 'revision',
-            'createdAt', 'createdBy', 'updatedAt', 'updatedBy', 'lastAuditId']);
+            'createdAt', 'createdBy', 'updatedAt', 'updatedBy', 'lastAuditId', 'kind']);
       }
       // Catalogs are authenticated; public reads of users would expose payroll/PII.
-      allow get: if active();
-      allow list: if active() && bounded();
-      allow create: if admin() && valid(request.resource.data) && createStamp(request.resource.data) &&
-        request.resource.data.revenueMinor == 0 && request.resource.data.doctorIds.size() == 0 &&
-        request.resource.data.services.size() == 0 && audit(request.resource.data, ['DEPARTMENT_CREATED']);
-      allow update: if updateStamp(request.resource.data) && valid(request.resource.data) && (
+      allow get: if departmentId == '_settings' ? admin() : active();
+      allow list: if admin() || active() && bounded() && resource.data.active == true;
+      allow create: if admin() && createStamp(request.resource.data) && (
+        departmentId == '_settings' && validSettings(request.resource.data) && audit(request.resource.data, ['SETTINGS_UPDATED']) ||
+        departmentId != '_settings' && valid(request.resource.data) && request.resource.data.revenueMinor == 0 && request.resource.data.doctorIds.size() == 0 &&
+          request.resource.data.services.size() == 0 && audit(request.resource.data, ['DEPARTMENT_CREATED']));
+      allow update: if updateStamp(request.resource.data) && (
+        departmentId == '_settings' && admin() && validSettings(request.resource.data) && changedOnly(['labCapacity', 'emergencyThreshold']) && audit(request.resource.data, ['SETTINGS_UPDATED']) ||
+        departmentId != '_settings' && valid(request.resource.data) && (
+        role('doctor') && ownDoctorProjection(request.resource.data) ||
         admin() && changedOnly(['name', 'active', 'emergencyEnabled', 'headDoctorId', 'doctorIds', 'doctorProfiles', 'staffProfiles', 'services']) &&
-          audit(request.resource.data, ['STAFF_CREATED', 'STAFF_STATUS_CHANGED', 'DEPARTMENT_SERVICE_UPDATED', 'DOCTOR_SCHEDULE_UPDATED']) ||
+          audit(request.resource.data, ['STAFF_CREATED', 'STAFF_STATUS_CHANGED', 'STAFF_EDITED', 'DEPARTMENT_UPDATED', 'DEPARTMENT_SERVICE_UPDATED', 'DOCTOR_SCHEDULE_UPDATED']) ||
         reception() && changedOnly(['revenueMinor', 'revenue', 'collectedRevenue', 'lastPaidInvoiceId']) &&
           audit(request.resource.data, ['PAYMENT_CONFIRMED']) &&
           get(dataPath('invoices', request.resource.data.lastPaidInvoiceId)).data.status != 'paid' &&
           getAfter(dataPath('invoices', request.resource.data.lastPaidInvoiceId)).data.status == 'paid' &&
           getAfter(dataPath('invoices', request.resource.data.lastPaidInvoiceId)).data.departmentId == departmentId &&
           request.resource.data.revenueMinor == resource.data.revenueMinor + getAfter(dataPath('invoices', request.resource.data.lastPaidInvoiceId)).data.totalMinor
-      );
+      ));
       allow delete: if false;
     }
 
     match /appointments/{appointmentId} {
+      function validCase(d) {
+        return d.kind == 'case-lock' && appointmentId == 'case_' + d.caseId && id(d.doctorId) && d.status in ['available', 'reserved'] &&
+          (d.status == 'available' && d.appointmentId == null || d.status == 'reserved' && d.appointmentId == d.caseId &&
+            getAfter(dataPath('appointments', d.caseId)).data.isEmergency && getAfter(dataPath('appointments', d.caseId)).data.slotId == appointmentId);
+      }
+      function emergency(d) {
+        let department = get(dataPath('departments', d.departmentId)).data;
+        return reception() && d.isEmergency && d.status == 'checked-in' && department.active && department.emergencyEnabled &&
+          department.headDoctorId != null && department.doctorProfiles[department.headDoctorId].active && department.doctorProfiles[d.doctorId].active &&
+          get(userPath(d.doctorId)).data.role == 'doctor' && get(userPath(d.doctorId)).data.accountStatus == 'active' &&
+          d.consultationFeeMinor == department.doctorProfiles[d.doctorId].consultationFeeMinor && d.scheduledAt == request.time &&
+          d.firstTriagedAt == request.time && d.firstTriageHour == (request.time + duration.value(5, 'h')).hours() &&
+          getAfter(userPath(d.patientId)).data.pendingEmergencyId == appointmentId;
+      }
       function canRead(d) {
         return active() && (d.kind == 'slot' || reception() || owns(d) || treating(d));
       }
@@ -161,6 +255,7 @@ service cloud.firestore {
         let doctor = department.doctorProfiles[d.doctorId];
         let local = d.scheduledAt + duration.value(5, 'h');
         return department.active && doctor.active && department.doctorIds.hasAny([d.doctorId]) &&
+          department.headDoctorId != null && department.doctorProfiles[department.headDoctorId].active == true &&
           doctor.schedule.times.hasAny([d.time]) && doctor.schedule.weekdays.hasAny([local.dayOfWeek() % 7]) &&
           !doctor.schedule.closedDates.hasAny([d.date]) &&
           local.year() == int(d.date.split('-')[0]) && local.month() == int(d.date.split('-')[1]) &&
@@ -169,7 +264,7 @@ service cloud.firestore {
           get(userPath(d.doctorId)).data.accountStatus == 'active';
       }
       function validSlot(d) {
-        return d.kind == 'slot' && d.status in ['reserved', 'available'] && id(d.doctorId) && date(d.date) &&
+        return d.kind == 'slot' && d.status in ['reserved', 'available'] && id(d.doctorId) && validDate(d.date) &&
           d.time.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$') &&
           appointmentId == 'slot_' + d.doctorId + '_' + d.date + '_' + d.time.replace(':', '') &&
           (d.status == 'available' && d.appointmentId == null || d.status == 'reserved' && id(d.appointmentId) &&
@@ -180,16 +275,22 @@ service cloud.firestore {
             getAfter(dataPath('appointments', d.appointmentId)).data.status in ['scheduled', 'confirmed', 'checked-in', 'in-progress']);
       }
       function validAppointment(d) {
-        return d.kind == 'appointment' && id(d.patientId) && id(d.doctorId) && id(d.departmentId) && date(d.date) &&
+        return d.kind == 'appointment' && id(d.patientId) && id(d.doctorId) && id(d.departmentId) && validDate(d.date) &&
+          appointmentId.size() <= 96 &&
           d.time.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$') && d.scheduledAt is timestamp &&
           d.status in ['scheduled', 'confirmed', 'checked-in', 'in-progress', 'completed', 'cancelled', 'no-show'] &&
           text(d.reason, 2000) && d.reason.size() > 0 && minor(d.consultationFeeMinor) &&
           d.paymentAmount == d.consultationFeeMinor / 100.0 && d.isEmergency is bool &&
-          d.paymentStatus in ['unpaid', 'paid'] && d.triage in [null, 'red', 'yellow', 'green'];
+          d.paymentStatus in ['unpaid', 'paid'] && d.triage in [null, 'red', 'yellow', 'green'] &&
+          d.triagePriority == (d.triage == 'red' ? 0 : d.triage == 'yellow' ? 1 : d.triage == 'green' ? 2 : 3);
       }
       allow get: if canRead(resource.data) || active() && !exists(dataPath('appointments', appointmentId));
-      allow list: if bounded() && canRead(resource.data);
-      allow create: if active() && createStamp(request.resource.data) && audit(request.resource.data, ['APPOINTMENT_CREATED', 'APPOINTMENT_RESCHEDULED']) && (
+      allow list: if admin() || bounded() && canRead(resource.data);
+      allow create: if active() && createStamp(request.resource.data) && (
+        audit(request.resource.data, ['EMERGENCY_ADMITTED']) && (
+          validCase(request.resource.data) || validAppointment(request.resource.data) && emergency(request.resource.data) &&
+            getAfter(dataPath('appointments', request.resource.data.slotId)).data.appointmentId == appointmentId) ||
+        audit(request.resource.data, ['APPOINTMENT_CREATED', 'APPOINTMENT_RESCHEDULED']) && (
         validSlot(request.resource.data) ||
         validAppointment(request.resource.data) && (reception() || role('patient') && owns(request.resource.data)) &&
           request.resource.data.status == 'scheduled' && request.resource.data.scheduledAt > request.time &&
@@ -198,14 +299,20 @@ service cloud.firestore {
           get(userPath(request.resource.data.patientId)).data.role == 'patient' &&
           getAfter(dataPath('appointments', request.resource.data.slotId)).data.appointmentId == appointmentId && scheduleMatches(request.resource.data) &&
           request.resource.data.consultationFeeMinor == get(dataPath('departments', request.resource.data.departmentId)).data.doctorProfiles[request.resource.data.doctorId].consultationFeeMinor
-      );
+      ));
       allow update: if active() && updateStamp(request.resource.data) && (
+        resource.data.kind == 'case-lock' && validCase(request.resource.data) && changedOnly(['status', 'appointmentId']) &&
+          request.resource.data.status == 'available' && getAfter(dataPath('appointments', resource.data.caseId)).data.status in ['cancelled', 'completed'] &&
+          audit(request.resource.data, ['VISIT_DISCHARGED', 'EMERGENCY_DISMISSED']) ||
         resource.data.kind == 'slot' && validSlot(request.resource.data) && changedOnly(['status', 'appointmentId']) &&
           audit(request.resource.data, ['APPOINTMENT_CREATED', 'APPOINTMENT_UPDATED', 'APPOINTMENT_RESCHEDULED', 'VISIT_DISCHARGED']) &&
           (resource.data.status == 'available' || request.resource.data.status == 'available' && (
             getAfter(dataPath('appointments', resource.data.appointmentId)).data.status in ['cancelled', 'no-show', 'completed'] ||
             getAfter(dataPath('appointments', resource.data.appointmentId)).data.slotId != appointmentId)) ||
         resource.data.kind == 'appointment' && validAppointment(request.resource.data) && (
+          resource.data.isEmergency && resource.data.status == 'checked-in' && request.resource.data.status == 'cancelled' &&
+            changedOnly(['status', 'statusReason']) && reception() && audit(request.resource.data, ['EMERGENCY_DISMISSED']) &&
+            getAfter(userPath(resource.data.patientId)).data.pendingEmergencyId == null ||
           changedOnly(['status', 'statusReason', 'checkedInAt', 'checkedInBy']) && audit(request.resource.data, ['APPOINTMENT_UPDATED']) &&
             (resource.data.status in ['scheduled', 'confirmed'] && request.resource.data.status == 'cancelled' && (owns(resource.data) || treating(resource.data) || reception()) ||
              reception() && (resource.data.status == 'scheduled' && request.resource.data.status == 'confirmed' ||
@@ -224,7 +331,9 @@ service cloud.firestore {
               getAfter(dataPath('visits', resource.data.visitId)).data.status == 'discharged') ||
           reception() && changedOnly(['paymentStatus']) && request.resource.data.paymentStatus == 'paid' &&
             audit(request.resource.data, ['PAYMENT_CONFIRMED']) && getAfter(dataPath('invoices', resource.data.invoiceId)).data.status == 'paid' ||
-          reception() && resource.data.isEmergency && changedOnly(['triage', 'triagePriority', 'triageAssessment', 'triagedAt']) &&
+          reception() && resource.data.isEmergency && changedOnly(['triage', 'triagePriority', 'triageAssessment', 'triagedAt', 'firstTriagedAt', 'firstTriageHour']) &&
+            request.resource.data.firstTriagedAt == resource.data.get('firstTriagedAt', request.time) &&
+            request.resource.data.firstTriageHour == resource.data.get('firstTriageHour', (request.time + duration.value(5, 'h')).hours()) &&
             text(request.resource.data.triageAssessment, 2000) && audit(request.resource.data, ['TRIAGE_CLASSIFIED'])
         )
       );
@@ -236,15 +345,19 @@ service cloud.firestore {
         return id(d.patientId) && id(d.doctorId) && id(d.departmentId) && d.appointmentId == visitId && d.invoiceId == visitId &&
           d.status in ['active', 'discharged'] && d.locked is bool && text(d.chiefComplaint, 2000) &&
           text(d.symptoms, 4000) && text(d.diagnosis, 4000) && text(d.notes, 6000) && d.vitals is map &&
-          d.prescription is list && d.prescription.size() <= 30 &&
+          d.vitals.keys().hasOnly(['bp', 'sugar', 'heartRate', 'temperature']) &&
+          validPressure(d.vitals.bp) &&
+          optionalNumber(d.vitals.sugar, 1500) && optionalNumber(d.vitals.heartRate, 350) && optionalNumber(d.vitals.temperature, 50) &&
+          (d.followUpDate == null || validDate(d.followUpDate)) && d.prescription is list && d.prescription.size() <= 8 &&
           d.openLabRequests is int && d.openLabRequests >= 0 && d.openLabRequests <= 10 &&
           d.openOperations is int && d.openOperations >= 0 && d.openOperations <= 5 &&
           (d.prescriptionPdf == null || file(d.prescriptionPdf) && d.prescriptionPdf.mimeType == 'application/pdf');
       }
       allow get: if clinicalRead(resource.data) || role('doctor') && !exists(dataPath('visits', visitId));
-      allow list: if bounded() && clinicalRead(resource.data);
+      allow list: if clinicalRead(resource.data) && (bounded() || admin() || treating(resource.data));
       allow create: if role('doctor') && valid(request.resource.data) && createStamp(request.resource.data) &&
         request.resource.data.doctorId == request.auth.uid && request.resource.data.status == 'active' && request.resource.data.locked == false &&
+        request.resource.data.prescription == [] &&
         get(dataPath('appointments', visitId)).data.status == 'checked-in' && get(dataPath('appointments', visitId)).data.doctorId == request.auth.uid &&
         request.resource.data.patientId == get(dataPath('appointments', visitId)).data.patientId &&
         request.resource.data.departmentId == get(dataPath('appointments', visitId)).data.departmentId &&
@@ -253,10 +366,13 @@ service cloud.firestore {
       allow update: if updateStamp(request.resource.data) && valid(request.resource.data) && (
         changedOnly(['openLabRequests']) && resource.data.status == 'active' && resource.data.locked == false && (
           audit(request.resource.data, ['LAB_REQUEST_CREATED', 'LAB_REQUEST_CANCELLED']) && treating(resource.data) ||
-          audit(request.resource.data, ['LAB_RESULT_UPLOADED']) && role('lab') && request.resource.data.openLabRequests == resource.data.openLabRequests - 1) ||
+          audit(request.resource.data, ['LAB_RESULT_UPLOADED']) && role('lab')) &&
+          linkedClinicalCounter(request.resource.data, visitId, 'labRequests', 'openLabRequests', 'LAB_REQUEST_CREATED', 'LAB_RESULT_UPLOADED', 'LAB_REQUEST_CANCELLED') ||
         changedOnly(['openOperations']) && resource.data.status == 'active' && resource.data.locked == false &&
-          audit(request.resource.data, ['OPERATION_SCHEDULED', 'OPERATION_COMPLETED', 'OPERATION_CANCELLED']) && treating(resource.data) ||
+          audit(request.resource.data, ['OPERATION_SCHEDULED', 'OPERATION_COMPLETED', 'OPERATION_CANCELLED']) && treating(resource.data) &&
+          linkedClinicalCounter(request.resource.data, visitId, 'operations', 'openOperations', 'OPERATION_SCHEDULED', 'OPERATION_COMPLETED', 'OPERATION_CANCELLED') ||
         changedOnly(['chiefComplaint', 'symptoms', 'diagnosis', 'vitals', 'prescription', 'prescriptionPdf', 'followUpDate', 'notes']) && treating(resource.data) && resource.data.locked == false &&
+          (request.resource.data.prescription == resource.data.prescription || prescription(request.resource.data.prescription)) &&
           audit(request.resource.data, ['VISIT_UPDATED', 'PRESCRIPTION_ADDED']) ||
         changedOnly(['status', 'locked', 'dischargedAt', 'dischargeNotes']) && treating(resource.data) && resource.data.status == 'active' && resource.data.locked == false &&
           request.resource.data.status == 'discharged' && request.resource.data.locked == true &&
@@ -289,6 +405,7 @@ service cloud.firestore {
       }
       function sourceLine(line, d) {
         return line.sourceType == 'lab' && getAfter(dataPath('labRequests', line.sourceId)).data.invoiceId == invoiceId &&
+          line.id == line.sourceId && !exists(dataPath('labRequests', line.sourceId)) &&
           getAfter(dataPath('labRequests', line.sourceId)).data.status == 'pending' && line.quantity == 1 &&
           line.unitPriceMinor == getAfter(dataPath('labRequests', line.sourceId)).data.priceMinor ||
         line.sourceType == 'operation' && getAfter(dataPath('operations', line.sourceId)).data.invoiceId == invoiceId &&
@@ -307,7 +424,7 @@ service cloud.firestore {
           validLine(last) && sourceLine(last, d) && d.subtotalMinor == old.subtotalMinor + last.amountMinor;
       }
       allow get: if clinicalRead(resource.data) || reception() || role('doctor') && !exists(dataPath('invoices', invoiceId));
-      allow list: if bounded() && (clinicalRead(resource.data) || reception());
+      allow list: if admin() || bounded() && (clinicalRead(resource.data) || reception());
       allow create: if role('doctor') && valid(request.resource.data) && createStamp(request.resource.data) &&
         request.resource.data.status == 'unpaid' && request.resource.data.doctorId == request.auth.uid &&
         request.resource.data.items.size() == 1 && validLine(request.resource.data.items[0]) &&
@@ -334,7 +451,10 @@ service cloud.firestore {
            resource.data.status == 'unpaid' && request.resource.data.payment.method == 'cash' && text(request.resource.data.payment.reference, 150)) &&
           getAfter(dataPath('departments', resource.data.departmentId)).data.revenueMinor ==
             get(dataPath('departments', resource.data.departmentId)).data.revenueMinor + resource.data.totalMinor && audit(request.resource.data, ['PAYMENT_CONFIRMED']) ||
-        changedOnly(['items', 'subtotalMinor', 'taxMinor', 'totalMinor', 'subtotal', 'tax', 'total', 'taxBasisPoints', 'cancelledLabRequestId']) && treating(resource.data) && resource.data.status == 'unpaid' &&
+        changedOnly(['items', 'subtotalMinor', 'taxMinor', 'totalMinor', 'subtotal', 'tax', 'total', 'taxBasisPoints', 'cancelledLabRequestId', 'cancelledLabItemIndex']) && treating(resource.data) && resource.data.status == 'unpaid' &&
+          request.resource.data.cancelledLabItemIndex is int && request.resource.data.cancelledLabItemIndex >= 0 && request.resource.data.cancelledLabItemIndex < resource.data.items.size() &&
+          resource.data.items[request.resource.data.cancelledLabItemIndex].sourceId == request.resource.data.cancelledLabRequestId &&
+          request.resource.data.items == resource.data.items.removeAll([resource.data.items[request.resource.data.cancelledLabItemIndex]]) &&
           getAfter(dataPath('labRequests', request.resource.data.cancelledLabRequestId)).data.status == 'cancelled' &&
           request.resource.data.items.size() == resource.data.items.size() - 1 &&
           request.resource.data.subtotalMinor == resource.data.subtotalMinor - get(dataPath('labRequests', request.resource.data.cancelledLabRequestId)).data.priceMinor &&
@@ -350,11 +470,15 @@ service cloud.firestore {
           get(dataPath('visits', d.visitId)).data.status == 'active' && get(dataPath('visits', d.visitId)).data.locked == false;
       }
       allow get: if reception() || role('doctor');
-      allow list: if bounded() && (reception() || role('doctor'));
+      allow list: if admin() || bounded() && (reception() || role('doctor'));
       allow create: if admin() && createStamp(request.resource.data) && request.resource.data.status == 'available' &&
         request.resource.data.patientId == null && request.resource.data.visitId == null && minor(request.resource.data.dailyRateMinor) &&
         audit(request.resource.data, ['BED_CREATED']);
-      allow update: if reception() && updateStamp(request.resource.data) &&
+      allow update: if updateStamp(request.resource.data) && (
+        admin() && resource.data.status in ['available', 'maintenance'] && request.resource.data.status in ['available', 'maintenance'] &&
+          minor(request.resource.data.dailyRateMinor) && request.resource.data.dailyRate == request.resource.data.dailyRateMinor / 100.0 && text(request.resource.data.label, 100) &&
+          changedOnly(['label', 'dailyRateMinor', 'dailyRate', 'status']) && audit(request.resource.data, ['BED_UPDATED']) ||
+        reception() &&
         changedOnly(['status', 'patientId', 'visitId', 'sessionId', 'assignedAt', 'assignedBy', 'rateAtAssignmentMinor', 'releasedAt']) && (
           resource.data.status == 'available' && linked(request.resource.data) && request.resource.data.assignedAt == request.time &&
             request.resource.data.rateAtAssignmentMinor == resource.data.dailyRateMinor && audit(request.resource.data, ['BED_ASSIGNED', 'BED_RELEASED']) ||
@@ -363,7 +487,7 @@ service cloud.firestore {
             getAfter(dataPath('visits', resource.data.visitId)).data.bedId != bedId &&
             getAfter(dataPath('invoices', resource.data.visitId)).data.items.size() == get(dataPath('invoices', resource.data.visitId)).data.items.size() + 1 &&
             audit(request.resource.data, ['BED_RELEASED'])
-        );
+        ));
       allow delete: if false;
     }
 
@@ -378,11 +502,15 @@ service cloud.firestore {
           (items.size() > 4 && listedDeduction(items[4], d));
       }
       allow get: if staff();
-      allow list: if staff() && bounded();
+      allow list: if staff() && (bounded() || admin());
       allow create: if admin() && createStamp(request.resource.data) && minor(request.resource.data.priceMinor) &&
         request.resource.data.quantity is int && request.resource.data.quantity >= 0 && request.resource.data.threshold is int &&
         request.resource.data.threshold >= 0 && request.resource.data.usedQuantity == 0 && audit(request.resource.data, ['INVENTORY_CREATED']);
       allow update: if updateStamp(request.resource.data) && request.resource.data.quantity is int && request.resource.data.quantity >= 0 && (
+        admin() && changedOnly(['name', 'priceMinor', 'price', 'threshold', 'lowStock']) && text(request.resource.data.name, 150) &&
+          minor(request.resource.data.priceMinor) && request.resource.data.price == request.resource.data.priceMinor / 100.0 &&
+          request.resource.data.threshold is int && request.resource.data.threshold >= 0 &&
+          request.resource.data.lowStock == (request.resource.data.quantity <= request.resource.data.threshold) && audit(request.resource.data, ['INVENTORY_UPDATED']) ||
         admin() && request.resource.data.quantity > resource.data.quantity && changedOnly(['quantity', 'lowStock', 'purchasedQuantity', 'purchaseValueMinor']) &&
           request.resource.data.purchasedQuantity - resource.data.purchasedQuantity == request.resource.data.quantity - resource.data.quantity &&
           request.resource.data.purchaseValueMinor - resource.data.purchaseValueMinor == (request.resource.data.quantity - resource.data.quantity) * resource.data.priceMinor &&
@@ -402,9 +530,13 @@ service cloud.firestore {
     match /labRequests/{requestId} {
       allow get: if role('lab') || treating(resource.data) || admin() || role('patient') && owns(resource.data) && resource.data.status == 'completed' ||
         role('doctor') && !exists(dataPath('labRequests', requestId));
-      allow list: if bounded() && (role('lab') || treating(resource.data) || admin() || role('patient') && owns(resource.data) && resource.data.status == 'completed');
+      allow list: if admin() || bounded() && (role('lab') || treating(resource.data) || role('patient') && owns(resource.data) && resource.data.status == 'completed');
       allow create: if role('doctor') && createStamp(request.resource.data) && request.resource.data.doctorId == request.auth.uid &&
         activeVisit(request.resource.data.visitId) && request.resource.data.status == 'pending' && request.resource.data.result == null &&
+        request.resource.data.patientId == get(dataPath('visits', request.resource.data.visitId)).data.patientId &&
+        request.resource.data.invoiceId == get(dataPath('visits', request.resource.data.visitId)).data.invoiceId &&
+        request.resource.data.departmentId == get(dataPath('visits', request.resource.data.visitId)).data.departmentId &&
+        get(dataPath('departments', request.resource.data.departmentId)).data.services[request.resource.data.testId].active == true && minor(request.resource.data.priceMinor) &&
         get(dataPath('departments', request.resource.data.departmentId)).data.services[request.resource.data.testId].type == 'lab' &&
         request.resource.data.priceMinor == get(dataPath('departments', request.resource.data.departmentId)).data.services[request.resource.data.testId].priceMinor &&
         getAfter(dataPath('visits', request.resource.data.visitId)).data.openLabRequests == get(dataPath('visits', request.resource.data.visitId)).data.openLabRequests + 1 &&
@@ -490,7 +622,7 @@ service cloud.firestore {
 
     match /attendance/{attendanceId} {
       function valid(d) {
-        return d.userId is string && date(d.date) && attendanceId == d.userId + '_' + d.date &&
+        return d.userId is string && validDate(d.date) && attendanceId == d.userId + '_' + d.date &&
           d.kind == 'daily' &&
           d.status in ['present', 'absent', 'late', 'half-day', 'leave'] &&
           get(userPath(d.userId)).data.role in ['doctor', 'receptionist', 'lab'] &&
@@ -589,10 +721,22 @@ service cloud.firestore {
     }
 
     match /messages/{messageId} {
+      function validNotice(d) {
+        let conversation = get(dataPath('chats', d.chatId)).data;
+        let doctor = get(dataPath('departments', conversation.departmentId)).data.doctorProfiles[conversation.doctorId];
+        let h = doctor.get('messagingHours', null);
+        let local = request.time + duration.value(5, 'h');
+        return d.senderId == conversation.doctorId ? d.autoReplyNotice == null :
+          h == null ? d.autoReplyNotice == null :
+          d.autoReplyNotice == (h.days.hasAny([local.dayOfWeek() % 7]) &&
+            local.hours() * 60 + local.minutes() >= int(h.start.split(':')[0]) * 60 + int(h.start.split(':')[1]) &&
+            local.hours() * 60 + local.minutes() < int(h.end.split(':')[0]) * 60 + int(h.end.split(':')[1]) ? null : h.autoReply);
+      }
       function participant(d) { return active() && request.auth.uid in get(dataPath('chats', d.chatId)).data.participants; }
       allow get: if participant(resource.data) || active() && !exists(dataPath('messages', messageId));
       allow list: if bounded() && participant(resource.data);
       allow create: if participant(request.resource.data) && createStamp(request.resource.data) &&
+        validNotice(request.resource.data) &&
         request.resource.data.senderId == request.auth.uid && request.resource.data.recipientId != request.auth.uid &&
         request.resource.data.recipientId in get(dataPath('chats', request.resource.data.chatId)).data.participants &&
         text(request.resource.data.text, 4000) && (request.resource.data.text.size() > 0 || file(request.resource.data.file)) &&
@@ -601,6 +745,7 @@ service cloud.firestore {
         getAfter(dataPath('chats', request.resource.data.chatId)).data.sequence == request.resource.data.sequence &&
         getAfter(dataPath('chats', request.resource.data.chatId)).data.lastMessage.id == messageId && audit(request.resource.data, ['CHAT_MESSAGE_SENT']);
       allow update: if participant(resource.data) && request.auth.uid == resource.data.recipientId && updateStamp(request.resource.data) &&
+        getAfter(dataPath('chats', resource.data.chatId)).data.lastAuditId == request.resource.data.lastAuditId &&
         changedOnly(['status', 'deliveredAt', 'seenAt']) &&
         (resource.data.status == 'sent' && request.resource.data.status in ['delivered', 'seen'] ||
          resource.data.status == 'delivered' && request.resource.data.status == 'seen') && audit(request.resource.data, ['CHAT_MESSAGES_READ']);
@@ -609,7 +754,7 @@ service cloud.firestore {
 
     match /ratings/{ratingId} {
       allow get: if clinicalRead(resource.data) || role('patient') && !exists(dataPath('ratings', ratingId));
-      allow list: if bounded() && clinicalRead(resource.data);
+      allow list: if clinicalRead(resource.data) && (bounded() || admin() || treating(resource.data));
       allow create: if role('patient') && owns(request.resource.data) && createStamp(request.resource.data) &&
         request.resource.data.visitId == ratingId && request.resource.data.rating is int &&
         request.resource.data.rating >= 1 && request.resource.data.rating <= 5 && text(request.resource.data.review, 2000) &&
@@ -620,12 +765,13 @@ service cloud.firestore {
 
     match /auditLogs/{logId} {
       allow get: if admin();
-      allow list: if admin() && bounded();
+      allow list: if admin();
       allow create: if signedIn() && request.resource.data.schemaVersion == 2 &&
         request.resource.data.keys().hasOnly(['schemaVersion', 'actorId', 'userId', 'action', 'targetCollection', 'targetId', 'details', 'timestamp']) &&
         request.resource.data.actorId == request.auth.uid && request.resource.data.userId == request.auth.uid &&
         request.resource.data.timestamp == request.time && request.resource.data.details is map &&
-        (request.resource.data.action in ['USER_LOGIN', 'USER_LOGOUT'] && active() && request.resource.data.targetCollection == 'users' &&
+        (request.resource.data.action in ['USER_LOGIN', 'USER_LOGOUT', 'DATA_EXPORTED'] && active() &&
+          (request.resource.data.action != 'DATA_EXPORTED' || admin()) && request.resource.data.targetCollection == 'users' &&
           request.resource.data.targetId == request.auth.uid ||
          getAfter(dataPath(request.resource.data.targetCollection, request.resource.data.targetId)).data.lastAuditId == logId &&
           getAfter(dataPath(request.resource.data.targetCollection, request.resource.data.targetId)).data.updatedBy == request.auth.uid);

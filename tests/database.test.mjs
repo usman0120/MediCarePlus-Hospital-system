@@ -6,7 +6,8 @@ import { initializeTestEnvironment } from '@firebase/rules-unit-testing';
 import { initializeApp as initializeAdminApp, deleteApp as deleteAdminApp } from 'firebase-admin/app';
 import { getAuth as getAdminAuth } from 'firebase-admin/auth';
 import { connectAuthEmulator, signInWithEmailAndPassword, signOut } from 'firebase/auth';
-import { connectFirestoreEmulator, doc, setDoc, getDoc, Timestamp } from 'firebase/firestore';
+import { deleteApp as deleteClientApp } from 'firebase/app';
+import { connectFirestoreEmulator, doc, setDoc, getDoc, Timestamp, writeBatch, serverTimestamp, increment, terminate } from 'firebase/firestore';
 import { hospitalDate, encodeAttachment } from '../src/utils/transactions.js';
 
 const projectId = 'demo-medicare-foundation';
@@ -22,7 +23,7 @@ before(async () => {
   await environment.clearFirestore();
   adminApp = initializeAdminApp({ projectId }, `test-${Date.now()}`);
   const adminAuth = getAdminAuth(adminApp);
-  for (const role of ['patient1', 'patient2', 'doctor', 'reception', 'lab']) {
+  for (const role of ['patient1', 'patient2', 'doctor', 'reception', 'lab', 'management']) {
     identities[role] = await adminAuth.createUser({ email: `${role}-${Date.now()}@example.test`, password, emailVerified: true });
   }
   const config = { VITE_FIREBASE_API_KEY: 'emulator-only', VITE_FIREBASE_AUTH_DOMAIN: `${projectId}.firebaseapp.com`,
@@ -41,7 +42,7 @@ before(async () => {
     const now = Timestamp.now();
     for (const [name, identity] of Object.entries(identities)) {
       await setDoc(doc(database, 'users', identity.uid), { schemaVersion: 2, revision: 1, uid: identity.uid,
-        email: identity.email, role: name.startsWith('patient') ? 'patient' : name === 'reception' ? 'receptionist' : name,
+        email: identity.email, role: name.startsWith('patient') ? 'patient' : name === 'reception' ? 'receptionist' : name === 'management' ? 'admin' : name,
         fullName: name, phone: '', emergencyContact: '', cnic: '', dateOfBirth: '', gender: '', bloodGroup: '', address: '',
         baseSalaryMinor: 0, accountStatus: 'active', careTeamIds: [], activeVisitId: null, currentBedId: null,
         departmentId: name.startsWith('patient') ? null : 'cardiology', department: '', specialization: '', licenseNumber: '',
@@ -68,7 +69,7 @@ before(async () => {
 const adminClient = () => createHospitalDatabase({
   auth: { currentUser: { uid: 'adminMfa', emailVerified: true } },
   db: environment.authenticatedContext('adminMfa', { email: 'admin@example.test', email_verified: true,
-    firebase: { sign_in_provider: 'password', sign_in_second_factor: 'totp' } }).firestore(),
+    firebase: { sign_in_provider: 'password' } }).firestore(),
 });
 test('beds and operations synchronize billing, safety checks and inventory once', async () => {
   const admin = adminClient();
@@ -123,10 +124,13 @@ test('concurrent patients cannot reserve the same doctor slot', async () => {
   assert.equal(results.find(result => !result.success).code, 'slot-unavailable');
 });
 after(async () => {
-  const coverage = await fetch(`http://127.0.0.1:8080/emulator/v1/projects/${projectId}:ruleCoverage`).then(response => response.json());
-  await mkdir(new URL('./.generated/', import.meta.url), { recursive: true });
-  await writeFile(new URL('./.generated/rule-coverage.json', import.meta.url), JSON.stringify(coverage));
+  if (process.env.MEDICARE_RULE_COVERAGE === 'true') {
+    const coverage = await fetch(`http://127.0.0.1:8080/emulator/v1/projects/${projectId}:ruleCoverage`).then(response => response.json());
+    await mkdir(new URL('./.generated/', import.meta.url), { recursive: true });
+    await writeFile(new URL('./.generated/rule-coverage.json', import.meta.url), JSON.stringify(coverage));
+  }
   if (auth) await signOut(auth);
+  if (db) await terminate(db); if (auth) await deleteClientApp(auth.app);
   await environment?.cleanup(); await vite?.close(); if (adminApp) await deleteAdminApp(adminApp);
 });
 const login = name => signInWithEmailAndPassword(auth, identities[name].email, password);
@@ -188,3 +192,52 @@ async function updateForCheckIn(database, id) {
   const snapshot = await getDoc(ref);
   await setDoc(ref, { ...snapshot.data(), status: 'checked-in' });
 }
+
+test('emergency intake bypasses routine slots, locks one waiting case and validates a full prescription', async () => {
+  const admin = adminClient();
+  ok(await admin.editDepartment('cardiology', { name: 'Cardiology', active: true, emergencyEnabled: true }));
+  await login('reception');
+  const patient = ok(await hospital.registerWalkIn({ fullName: 'Emergency test fixture', phone: '+923001234567' }, identities.reception.uid));
+  const request = { patientId: patient.id, departmentId: 'cardiology', doctorId: identities.doctor.uid, triage: 'red', reason: 'Recorded emergency complaint', assessment: 'Recorded urgent assessment', requestId: 'emergency1' };
+  ok(await hospital.intakeEmergency(request));
+  assert.equal((await hospital.intakeEmergency({ ...request, requestId: 'duplicateEmergency' })).code, 'active-visit');
+  await login('doctor');
+  const visit = ok(await hospital.startVisit('emergency1'));
+  const medicines = Array.from({ length: 8 }, (_, i) => ({ name: `Medicine ${i}`, dose: 'Recorded dose', frequency: 'Daily', duration: 'Three days', instructions: '' }));
+  assert.equal((await hospital.saveEMR(visit.id, { chiefComplaint: 'Complaint', symptoms: 'Symptoms', diagnosis: 'Diagnosis', prescription: [...medicines, medicines[0]] }, 1)).code, 'validation');
+  ok(await hospital.saveEMR(visit.id, { chiefComplaint: 'Complaint', symptoms: 'Symptoms', diagnosis: 'Diagnosis', vitals: { bp: '120/80' }, prescription: medicines, notes: '' }, 1));
+  const before = (await getDoc(doc(db, 'visits', visit.id))).data();
+  const badLog = doc(db, 'auditLogs', 'invalidMedicineLog'); const bad = writeBatch(db);
+  bad.update(doc(db, 'visits', visit.id), { prescription: [{ ...medicines[0], dose: 10 }], revision: before.revision + 1, updatedAt: serverTimestamp(), updatedBy: identities.doctor.uid, lastAuditId: badLog.id });
+  bad.set(badLog, { schemaVersion: 2, actorId: identities.doctor.uid, userId: identities.doctor.uid, action: 'VISIT_UPDATED', targetCollection: 'visits', targetId: visit.id, details: {}, timestamp: serverTimestamp() });
+  await assert.rejects(bad.commit(), error => error.code === 'permission-denied');
+  const counterLog = doc(db, 'auditLogs', 'missingLabPartner'); const counter = writeBatch(db);
+  counter.update(doc(db, 'visits', visit.id), { openLabRequests: increment(1), revision: increment(1), updatedAt: serverTimestamp(), updatedBy: identities.doctor.uid, lastAuditId: counterLog.id });
+  counter.set(counterLog, { schemaVersion: 2, actorId: identities.doctor.uid, userId: identities.doctor.uid, action: 'LAB_REQUEST_CREATED', targetCollection: 'labRequests', targetId: 'missingRequest', details: {}, timestamp: serverTimestamp() });
+  await assert.rejects(counter.commit(), error => error.code === 'permission-denied');
+  assert.equal((await getDoc(doc(db, 'visits', visit.id))).data().openLabRequests, 0);
+  ok(await hospital.dischargeVisit(visit.id));
+});
+
+test('chat delivered/seen acknowledgments are monotonic and idempotent for eight-message batches', async () => {
+  const id = `chat_${identities.doctor.uid}_${identities.patient2.uid}`; const ids = Array.from({ length: 8 }, (_, i) => `receiptMessage${i}`);
+  await login('patient2'); for (const message of ids) ok(await hospital.sendMessage(id, { text: message }, message));
+  await login('doctor'); ok(await hospital.acknowledgeMessages(id, ids, 'delivered')); ok(await hospital.acknowledgeMessages(id, ids, 'seen')); ok(await hospital.acknowledgeMessages(id, ids, 'seen'));
+  assert.equal((await getDoc(doc(db, 'chats', id))).data().unreadCount[identities.doctor.uid], 0);
+});
+
+test('real staff provisioning preserves the administrator session and reports email delivery failures', async () => {
+  await login('management'); const uid = auth.currentUser.uid;
+  const { createStaffUser } = await vite.ssrLoadModule('/src/auth.js');
+  const result = await createStaffUser({ email: `staff-${Date.now()}@example.test`, fullName: 'Staff fixture', role: 'doctor', departmentId: 'cardiology', employmentStartDate: '2025-01-01', baseSalary: 26000, consultationFee: 1000, specialization: 'General medicine', licenseNumber: 'PMDC-FIXTURE' }, uid);
+  const staff = ok(result); assert.equal(auth.currentUser.uid, uid); assert.equal(staff.role, 'doctor'); assert.equal(result.emailsSent, false);
+  assert.equal((await getDoc(doc(db, 'users', staff.id))).data().createdBy, uid);
+});
+
+test('server aggregates include actual revenue, inventory acquisition and emergency assessments', async () => {
+  const admin = adminClient(); ok(await admin.configureAlerts({ labCapacity: 10, emergencyThreshold: 5 }));
+  const metrics = ok(await admin.alertMetrics()); assert.equal(metrics.emergencies, 1);
+  const report = ok(await admin.analytics(hospitalDate(), hospitalDate()));
+  assert.equal(report.revenueMinor, 400000); assert.equal(report.inventoryCostMinor, 50000); assert.equal(report.completedVisits, 2);
+  assert.equal(report.emergencyHours.reduce((total, item) => total + item.count, 0), 1);
+});

@@ -4,8 +4,7 @@ import {
   createUserWithEmailAndPassword, deleteUser, getAuth, signInWithEmailAndPassword, signOut,
   sendEmailVerification, sendPasswordResetEmail, sendSignInLinkToEmail, isSignInWithEmailLink,
   signInWithEmailLink, GoogleAuthProvider, signInWithPopup, RecaptchaVerifier,
-  PhoneAuthProvider, linkWithCredential, reload, getIdToken, getIdTokenResult, multiFactor,
-  getMultiFactorResolver, TotpMultiFactorGenerator,
+  PhoneAuthProvider, linkWithCredential, reload, getIdToken, getIdTokenResult, connectAuthEmulator,
 } from 'firebase/auth';
 import { app, auth } from './firebase.js';
 import { hospital } from './database.js';
@@ -35,8 +34,8 @@ const authResult = async work => {
   try { return await work(); }
   catch (error) {
     if (error.code === 'auth/multi-factor-auth-required') {
-      return { success: false, code: error.code, requiresMfa: true, resolver: getMultiFactorResolver(auth, error),
-        error: 'Enter your authenticator code to finish signing in.' };
+      return { success: false, code: error.code,
+        error: 'This account still has MFA enrolled in Firebase. The project owner must remove enrollment to use the approved password-only policy.' };
     }
     return { success: false, code: error.code || 'unexpected',
       error: error instanceof WorkflowError ? error.message : errors[error.code] || 'Authentication failed. Please retry or contact support.' };
@@ -59,7 +58,7 @@ const finishLogin = async user => {
   }
   if (profile.data.role === 'admin' && (await getIdTokenResult(user)).claims.firebase?.sign_in_provider !== 'password') {
     await signOut(auth);
-    return { success: false, code: 'admin-password-required', error: 'Administrators must sign in with email/password and an authenticator.' };
+    return { success: false, code: 'admin-password-required', error: 'Administrators must sign in with verified email and password.' };
   }
   const audit = await hospital.recordAuthEvent('USER_LOGIN');
   if (!audit.success) { await signOut(auth); return audit; }
@@ -147,6 +146,7 @@ const provisionUser = (data, createdBy, role) => authResult(async () => {
   // A separate, in-memory Auth instance preserves the creator’s session.
   const secondary = initializeApp(app.options, `provision-${crypto.randomUUID()}`);
   const secondaryAuth = getAuth(secondary);
+  if (auth.emulatorConfig) connectAuthEmulator(secondaryAuth, `http://${auth.emulatorConfig.host}:${auth.emulatorConfig.port}`, { disableWarnings: true });
   let user;
   try {
     await setPersistence(secondaryAuth, inMemoryPersistence);
@@ -158,8 +158,8 @@ const provisionUser = (data, createdBy, role) => authResult(async () => {
       return profile;
     }
     const delivery = await Promise.allSettled([
-      sendEmailVerification(user, settings()),
-      sendPasswordResetEmail(secondaryAuth, data.email, { url: `${window.location.origin}/login` }),
+      Promise.resolve().then(() => sendEmailVerification(user, settings())),
+      Promise.resolve().then(() => sendPasswordResetEmail(secondaryAuth, data.email, { url: `${window.location.origin}/login` })),
     ]);
     const emailsSent = delivery.every(item => item.status === 'fulfilled');
     return { success: true, data: profile.data, emailsSent,
@@ -169,7 +169,7 @@ const provisionUser = (data, createdBy, role) => authResult(async () => {
   }
 });
 export const createStaffUser = (data, createdBy) => provisionUser(data, createdBy, data.role);
-export const registerPatient = (data, createdBy) => provisionUser(data, createdBy, 'patient');
+export const registerPatient = (data, createdBy) => data.email ? provisionUser(data, createdBy, 'patient') : hospital.registerWalkIn(data, createdBy);
 export const createAppointmentFromRegistration = input => hospital.bookAppointment(input);
 
 // Phone OTP is linked to an email-verified identity. Phone-only login cannot
@@ -185,22 +185,4 @@ export const sendPhoneVerification = (phone, verifier) => authResult(async () =>
 export const confirmPhoneVerification = (verificationId, code) => authResult(async () => {
   await linkWithCredential(auth.currentUser, PhoneAuthProvider.credential(verificationId, code));
   return { success: true };
-});
-
-// Real TOTP, never a hardcoded/simulated code. Requires Firebase Identity Platform.
-export const beginTotpEnrollment = () => authResult(async () => {
-  assert(import.meta.env.VITE_ENABLE_TOTP === 'true', 'mfa-unavailable', 'Paid Auth features are disabled. Administrator verification must be configured before enrollment.');
-  const user = auth.currentUser; assert(user?.emailVerified, 'email-unverified', 'Verify your email first.');
-  const secret = await TotpMultiFactorGenerator.generateSecret(await multiFactor(user).getSession());
-  return { success: true, secret, uri: secret.generateQrCodeUrl(user.email, 'MediCare Plus') };
-});
-export const finishTotpEnrollment = (secret, code) => authResult(async () => {
-  await multiFactor(auth.currentUser).enroll(TotpMultiFactorGenerator.assertionForEnrollment(secret, code), 'Hospital authenticator');
-  await getIdToken(auth.currentUser, true); return { success: true };
-});
-export const completeTotpLogin = (resolver, code) => authResult(async () => {
-  const hint = resolver.hints.find(item => item.factorId === TotpMultiFactorGenerator.FACTOR_ID);
-  assert(hint, 'mfa-unsupported', 'This account does not have an authenticator factor.');
-  const credentials = await resolver.resolveSignIn(TotpMultiFactorGenerator.assertionForSignIn(hint.uid, code));
-  return finishLogin(credentials.user);
 });

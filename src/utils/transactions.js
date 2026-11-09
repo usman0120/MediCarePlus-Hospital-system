@@ -15,7 +15,7 @@ export const assert = (condition, code, message, fields) => {
 };
 
 export const requireId = (value, field = 'id') => {
-  assert(typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value),
+  assert(typeof value === 'string' && /^[A-Za-z0-9_-]{1,512}$/.test(value),
     'validation', `${field} is invalid.`, { [field]: 'Invalid document identifier' });
   return value;
 };
@@ -23,6 +23,7 @@ export const requireId = (value, field = 'id') => {
 export const requireText = (value, field, max = 2000, optional = false) => {
   assert(typeof value === 'string' || (optional && value == null), 'validation', `${field} must be text.`);
   const text = (value ?? '').trim();
+  assert(!text.includes('\u0000'), 'validation', `${field} contains an invalid null character.`, { [field]: 'Invalid control character' });
   assert((optional || text.length > 0) && text.length <= max, 'validation',
     `${field} must contain ${optional ? '0' : '1'}–${max} characters.`, { [field]: 'Invalid length' });
   return text;
@@ -207,9 +208,3 @@ export const decodeAttachment = async attachment => {
   assert(digest === attachment.sha256, 'file-corrupt', 'File checksum does not match.');
   return new Blob([bytes], { type: attachment.mimeType });
 };
-
-// Compatibility entry points; no duplicated transaction or toast logic.
-export const processCompletePayment = async (...args) => (await import('../database.js')).processPayment(...args);
-export const performOperationWithInventory = async (...args) => (await import('../database.js')).startOperation(...args);
-export const transferPatientWithBilling = async (...args) => (await import('../database.js')).hospital.transferBed(...args);
-export const processBulkSalary = async (...args) => (await import('../database.js')).hospital.paySalaries(...args);

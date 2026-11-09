@@ -69,8 +69,10 @@ test('reception cannot read EMR and patients cannot read staff payroll', async (
   await assertFails(getDoc(doc(client('patient1'), 'users', 'doctor1')));
   await assertFails(getDocs(query(collection(client('patient1'), 'salaryRecords'), limit(20))));
 });
-test('administrator access requires a real TOTP claim', async () => {
-  await assertFails(getDoc(doc(client('admin1', 'admin'), 'auditLogs', 'log1')));
-  await assertSucceeds(getDoc(doc(client('admin1', 'admin', true, true), 'auditLogs', 'log1')));
+test('administrator access uses verified password identity and protected role, not MFA or client flags', async () => {
+  await assertSucceeds(getDoc(doc(client('admin1', 'admin'), 'auditLogs', 'log1')));
+  await assertFails(getDoc(doc(client('admin1', 'admin', false), 'auditLogs', 'log1')));
+  const google = env.authenticatedContext('admin1', { email: 'admin1@example.test', email_verified: true, firebase: { sign_in_provider: 'google.com' } }).firestore();
+  await assertFails(getDoc(doc(google, 'auditLogs', 'log1')));
   await assertFails(updateDoc(doc(client('admin1', 'admin', true, true), 'auditLogs', 'log1'), { actorId: 'changed' }));
 });

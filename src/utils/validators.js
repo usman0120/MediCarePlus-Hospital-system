@@ -1,4 +1,5 @@
 import { appointmentInstant, hospitalDate, requireDate } from './transactions.js';
+import { MAX_PRESCRIPTION_MEDICINES } from './constants.js';
 
 const checked = errors => ({ isValid: Object.keys(errors).length === 0, errors });
 const hasText = (value, max = 2000) => typeof value === 'string' && value.trim().length > 0 && value.length <= max;
@@ -84,7 +85,7 @@ export const validateRecordedVitals = (vitals = {}) => {
 export const validatePrescription = data => {
   const errors = {};
   const medicines = data?.medicines || data?.prescription;
-  if (!Array.isArray(medicines) || !medicines.length || medicines.length > 30) errors.medicines = 'Select 1–30 medicines.';
+  if (!Array.isArray(medicines) || !medicines.length || medicines.length > MAX_PRESCRIPTION_MEDICINES) errors.medicines = `Select 1–${MAX_PRESCRIPTION_MEDICINES} medicines.`;
   else {
     const entries = {};
     medicines.forEach((medicine, index) => {
