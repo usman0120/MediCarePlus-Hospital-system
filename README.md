@@ -8,29 +8,22 @@ For support, create an issue in the repository. Never commit the `.env` file.
 React + Vite hospital management application using Firebase Authentication,
 Firestore, Tailwind CSS, Chart.js, FontAwesome and jsPDF.
 
-## Current status
+## Status
 
-**Under staged remediation, not approved for clinical production use.**
+**Under remediation, not approved for clinical production use.** See [AUDIT.md](AUDIT.md)
+for verified changes and remaining deployment blockers. Passing a build is not a
+security or clinical certification.
 
-The authoritative V2 data API is the `hospital` export in `src/database.js`.
-It includes appointment-slot transactions, structured visits, invoice/payment
-transactions, bed billing/transfers, lab requests, operation/inventory transactions,
-attendance, fixed-26 payroll, participant-only chat and audit records.
-
-The older dashboard exports below this API remain during migration. They are **not
-compatible with the new rules/schema** and must be replaced before deployment.
-See [AUDIT.md](AUDIT.md) for outstanding issues, limitations and migration work.
-
-## Local development
+## Development
 
 1. Use Node.js 22.12+ and `npm ci`.
-2. Copy `.env.example` to `.env` and provide your Firebase web configuration.
+2. Copy `.env.example` to `.env` and provide Firebase web configuration.
 3. Enable Email/Password and Google providers and configure authorized domains.
 4. Run `npm run dev`.
 
 There are no default passwords or public administrator/staff registration forms.
-Patients must verify their email. Shared-device sessions use session persistence;
-remembering a session is opt-in. Medical data is not deliberately persisted to disk.
+Patients must verify email. Shared-device sessions use session persistence;
+remembering a session is opt-in. Medical records are not deliberately persisted to disk.
 
 ## Verification
 
@@ -41,95 +34,92 @@ npm run lint
 npm run build
 ```
 
-The rules tests require Firebase CLI and Java. They use only the local
-`demo-medicare-foundation` emulator project, with synthetic test fixtures.
-They do not seed application data or connect to the live hospital project.
+Emulator tests use only the local `demo-medicare-foundation` project and synthetic
+test fixtures. They do not seed data or connect to the live hospital project.
+Use a supported Java LTS and Firebase CLI for emulator tests.
 
-## Sole administrator provisioning / test-data reset
+## Sole administrator / demo-data reset
 
-`scripts/reset-firebase.mjs` uses the Firebase Admin SDK **only as an owner-run
-maintenance tool**, not as a deployed backend. It does not need Cloud Functions.
+`scripts/reset-firebase.mjs` is an owner-run Firebase Admin SDK maintenance tool,
+not a deployed backend. No Cloud Functions are used.
 
-Set these **server-only shell variables**:
+Set these server-only variables in your local shell:
 
-- `GOOGLE_APPLICATION_CREDENTIALS`: absolute path to a service account for the
-  intended project. Keep the JSON file outside the repository.
-- `MEDICARE_FIREBASE_PROJECT`: the exact project ID.
-- `MEDICARE_ADMIN_EMAIL`: the administrator email requested by the project owner.
-- `MEDICARE_ADMIN_PASSWORD`: the password, provided securely in the local shell.
+- `GOOGLE_APPLICATION_CREDENTIALS`: service-account JSON outside the repository.
+- `MEDICARE_FIREBASE_PROJECT`: exact intended project ID.
+- `MEDICARE_ADMIN_EMAIL`: the owner-approved administrator email.
+- `MEDICARE_ADMIN_PASSWORD`: supplied securely in your shell, never in source code.
 
-Never use a `VITE_` prefix for administrator credentials; Vite values are public.
+Never prefix administrator credentials with `VITE_`; those values are public.
 
-Run `npm run firebase:reset` first. This is read-only and reports the target,
-account count and collections. After reviewing that output, apply explicitly:
+Run `npm run firebase:reset` for a read-only preview. Applying requires explicit confirmation:
 
 ```sh
 npm run firebase:reset -- --apply --confirm-project=YOUR_EXACT_PROJECT_ID
 ```
 
-Applying first creates a protected local backup, then removes test accounts and
-Firestore data, retaining/provisioning one admin. Auth and Firestore cannot share
-one atomic transaction; stop and review the backup if maintenance fails.
-Run only while the project is offline to avoid concurrent registrations/writes.
-Protect backups with OS access controls and approved encryption, then move them
-outside the workspace. Password hashes may be present in the Auth backup.
+The tool backs up data before retaining/provisioning one admin and removing demo
+accounts/documents. Auth and Firestore cannot share an atomic transaction. Stop
+and inspect the backup if maintenance fails. Run only while registrations/writes
+are disabled. Protect backups with OS controls and approved encryption; move them
+outside the workspace. Auth backups may contain password hashes.
 
-The current CLI account has not been shown to have access to `fyp2-175ea`.
-No remote reset, admin creation, index deployment or rules deployment has run.
+Project-owner access to `fyp2-175ea` has not been established. No remote reset,
+administrator creation, index deployment or rules deployment has run.
 
-## Administrator MFA
+## Administrator verification and SMS
 
-The rules require Firebase's real `sign_in_second_factor: totp` token claim for
-administrator privileges. **The owner has declined paid Auth features**, so
-`VITE_ENABLE_TOTP=false` and privileged admin access intentionally remains blocked.
-No paid Auth configuration has been enabled. A secure, free verification alternative
-requires a separate architecture decision; a browser-only simulation is not one.
-The login page supports authenticators and gated enrollment;
-there is no simulated OTP fallback. Firebase Identity Platform/TOTP configuration
-and any associated billing must be approved before enabling administrator access.
-First sign in, verify email, enroll an authenticator and sign in again with MFA.
+The owner has declined paid Auth features. `VITE_ENABLE_TOTP=false` and
+`VITE_ENABLE_PHONE_AUTH=false` keep enrollment and SMS sending disabled. Privileged
+admin access requires a real password-plus-TOTP Firebase token and intentionally
+remains blocked until an approved secure alternative exists. A browser flag,
+hardcoded code or simulated OTP is not an alternative.
 
-Phone OTP helpers support linking a verified phone to an email-verified account;
-SMS sending is disabled by default (`VITE_ENABLE_PHONE_AUTH=false`) under the
-owner's no-paid-Auth decision. No SMS configuration has been enabled.
-phone-only identity does not meet the mandatory verified-email policy. SMS quotas
-and billing depend on Firebase's plan and country configuration.
+TOTP helpers require Identity Platform configuration and approval of any associated
+costs. Phone helpers link a phone to an email-verified identity; phone-only identity
+does not satisfy the mandatory verified-email policy. No paid provider was enabled.
 
 ## Financial and clinical policies
 
-- Money is stored in integer PKR paisa (`*Minor`). Display values are derived.
-- A slot is reserved before payment; reception checks in the patient, and the
-  assigned doctor opens the visit and consultation invoice.
-- Patients submit proof; only reception/admin confirms money received. Confirmation
-  locks the invoice and updates department revenue in the same transaction.
-- Additional services require an unpaid invoice. Pending proof must be rejected
-  before more charges can be added. Paid invoices are immutable; amendments/refunds
-  require a separately designed policy, not silent changes to paid records.
-- Bed charges use the documented rolling-24-hour, minimum-one-day policy on release.
-  This policy needs hospital approval before use.
-- Salary uses a 26-day deduction divisor. The owner-approved default is Monday–Saturday,
-  Sunday off, paid approved leave, no lateness deduction and a half-day deduction
-  of 0.5 daily salary. This remains configurable per staff member. Missing attendance blocks finalization.
-  Finalized payroll freezes attendance; salary payout cannot be repeated.
-- No tax, overtime, discounts or fees are invented. Approve those policies before
-  extending the financial schema.
+- Store money as integer PKR paisa (`*Minor`); display amounts are derived.
+- Reserve a doctor slot atomically before payment. Reception confirms/checks in;
+  the assigned doctor starts the visit and consultation invoice.
+- Patients submit proof. Only reception/admin confirms actual receipt of money.
+  Confirmation locks the invoice and updates revenue in the same transaction.
+- New charges require an unpaid invoice. Pending proof must be rejected before
+  adding charges. Paid invoices cannot be rewritten; refunds need an approved
+  separate workflow.
+- Bed billing uses rolling 24-hour periods, minimum one day, settled on release.
+  Hospital approval of this policy remains required.
+- Approved payroll default: divisor 26, Monday–Saturday, paid approved leave,
+  no lateness deduction, half-day deduction 0.5 daily salary. It is configurable
+  per employee. Missing attendance prevents finalization. Finalization freezes
+  attendance, and payout cannot be repeated.
+- No tax, overtime, discounts, appointment fees or simulated settlements are invented.
+- Discharge locks medical records. Only authorized administration can unlock a
+  record for an audited amendment.
 
-## Files and platform limits
+## Files and platform constraints
 
-Files are gzip-compressed client-side into Base64 with size metadata and SHA-256
-checksums. Supported files are PDF/JPEG/PNG/WebP. Compressed Base64 must be at most
-600,000 characters, and the complete application document is capped conservatively
-at 900,000 bytes. Some PDFs/images do not compress enough and are rejected.
+Files are compressed client-side into gzip Base64 with size metadata and SHA-256
+checksums. Supported types: PDF/JPEG/PNG/WebP. Encoded files must fit 600,000
+characters and the entire document must remain below the conservative 900,000-byte
+application limit. Incompressible PDFs/photos may need to be reduced before upload.
 
-Base64 is **not encryption**. Client checksums are integrity checks, not malware
-scanning or proof of payment authenticity. Firestore rules cannot decompress files.
-No Cloud Functions, Firebase Storage or fake background automation is used.
-Scheduled work, trustworthy IP/login telemetry, payment settlement, immutable external
-audit trails and point-in-time backups cannot be guaranteed by a browser-only app.
+Base64 is not encryption. Checksums are integrity checks, not malware scanning or
+proof of payment authenticity. Firestore rules cannot decompress uploaded files.
+There is no Firebase Storage, Cloud Function or fake background synchronization.
+
+A browser-only application cannot guarantee unattended scheduled jobs, trustworthy
+IP/login telemetry, external payment settlement, immutable external audit trails or
+point-in-time backups. Browser data exports are not point-in-time disaster recovery.
 
 ## Deployment
 
-Do not deploy until the dashboard migration, positive/negative workflow tests,
-dependency review and hospital-policy approval are complete. Then deploy the rules
-and indexes to the approved project and use Vercel for the Vite build. Never send
-service account JSON, administrator passwords or maintenance backups to Vercel.
+Do not deploy to real clinical use until workflow/rule tests, dependency review,
+owner provisioning and hospital policy/privacy approval are complete. Vercel hosts
+the Vite build; deploy rules/indexes separately to the approved Firebase project.
+Never upload service-account JSON, administrator passwords or backups to Vercel.
+
+Pushing `main` can trigger an existing Vercel integration. The preview must remain
+restricted to evaluation/staging while deployment blockers remain.
